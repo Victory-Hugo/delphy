@@ -107,6 +107,11 @@ auto redate_trees(
     // Adjust all times
     for (const auto& node : index_order_traversal(tree)) {
       tree.at(node).t += t_offset;
+      if (tree.at(node).is_tip()) {
+        // Keep the tip date bounds on the same time axis as the times they bound
+        tree.at(node).t_min += static_cast<float>(t_offset);
+        tree.at(node).t_max += static_cast<float>(t_offset);
+      }
       for (auto& m : tree.at(node).mutations) {
         m.t += t_offset;
       }

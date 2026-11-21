@@ -1,10 +1,16 @@
 #include "api.h"
 
 #include <ranges>
+#include <sstream>
 
+#include "absl/strings/str_format.h"
+
+#include "calibration.h"
 #include "run.h"
+#include "site_partition.h"
 #include "sequence.h"
 #include "dates.h"
+#include "newick.h"
 #include "generic_tree_prober.h"
 #include "site_states_tree_prober.h"
 #include "ancestral_tree_prober.h"
@@ -222,6 +228,60 @@ auto run_to_api_params(const Run& run) -> flatbuffers::DetachedBuffer {
     api_nu = fbb.CreateVector(run.nu());
   }
 
+  // Create the calibration config string before starting the Params object (can't nest object
+  // creation in flatbuffers)
+  auto api_site_partition_config = flatbuffers::Offset<flatbuffers::String>{};
+  auto api_site_partition_rates = flatbuffers::Offset<flatbuffers::Vector<double>>{};
+  if (run.has_site_partitions()) {
+    api_site_partition_config = fbb.CreateString(site_partition_config_to_string(run.site_partition_config()));
+    api_site_partition_rates = fbb.CreateVector(run.site_partition_rates());
+  }
+
+  // The substitution model is written only when it is not the default HKY85 with estimated
+  // frequencies, so that files of existing workflows stay byte-identical; HKY85 is reconstructed from
+  // `hky_kappa` and `hky_pi_*` on restore.
+  auto writes_subst_model = not (run.is_hky() &&
+                                 run.subst_model().frequency_mode == Frequency_mode::estimated);
+  auto api_subst_model_code = flatbuffers::Offset<flatbuffers::String>{};
+  auto api_subst_frequency_mode = flatbuffers::Offset<flatbuffers::String>{};
+  auto api_subst_class_rates = flatbuffers::Offset<flatbuffers::Vector<double>>{};
+  auto api_subst_exchangeability_prior = flatbuffers::Offset<flatbuffers::Vector<double>>{};
+  if (writes_subst_model) {
+    api_subst_model_code = fbb.CreateString(run.subst_model().grouping.code());
+    api_subst_frequency_mode =
+        fbb.CreateString(std::string{to_string(run.subst_model().frequency_mode)});
+    api_subst_class_rates = fbb.CreateVector(run.subst_model().class_rate);
+    api_subst_exchangeability_prior = fbb.CreateVector(std::vector<double>{
+        run.subst_exchangeability_prior_log_mean_transition(),
+        run.subst_exchangeability_prior_log_mean_other(),
+        run.subst_exchangeability_prior_sd()});
+  }
+
+  auto api_calibration_config = flatbuffers::Offset<flatbuffers::String>{};
+  if (run.has_calibrations()) {
+    api_calibration_config = fbb.CreateString(calibration_config_to_string(run.calibrations()));
+  }
+
+  // Opt-in sampler features and the state that lets a resumed run continue exactly (written only when a feature is on, so that
+  // files of existing workflows are byte-identical)
+  auto opt_in_features = run.exact_coalescent_correction() || run.global_scale_move_enabled();
+  auto api_prng_state = flatbuffers::Offset<flatbuffers::String>{};
+  auto api_sub_prng_states = flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>>>{};
+  auto api_stencil_cut_points = flatbuffers::Offset<flatbuffers::Vector<int32_t>>{};
+  auto stencil_refresh_step = int64_t{-1};
+  if (opt_in_features) {
+    auto resume = run.resume_state();
+    api_prng_state = fbb.CreateString(resume.prng);
+    api_sub_prng_states = fbb.CreateVectorOfStrings(resume.sub_prngs);
+    auto flat = std::vector<int32_t>{};
+    for (const auto& cut_points : resume.stencils) {
+      for (auto cut_point : cut_points) { flat.push_back(cut_point); }
+      flat.push_back(-1);
+    }
+    if (not flat.empty()) { api_stencil_cut_points = fbb.CreateVector(flat); }
+    stencil_refresh_step = resume.stencil_refresh_step;
+  }
+
   auto pop_model_type = api::PopModel_NONE;
   auto pop_model_offset = flatbuffers::Offset<void>{};
 
@@ -257,7 +317,7 @@ auto run_to_api_params(const Run& run) -> flatbuffers::DetachedBuffer {
   params_builder.add_mu_prior_beta(run.mu_prior_beta());
   params_builder.add_alpha(run.alpha());
   params_builder.add_nu(api_nu);
-  params_builder.add_hky_kappa(run.hky_kappa());
+  params_builder.add_hky_kappa(run.is_hky() ? run.hky_kappa() : 1.0);
   params_builder.add_hky_pi_A(run.hky_pi()[Real_seq_letter::A]);
   params_builder.add_hky_pi_C(run.hky_pi()[Real_seq_letter::C]);
   params_builder.add_hky_pi_G(run.hky_pi()[Real_seq_letter::G]);
@@ -298,7 +358,40 @@ auto run_to_api_params(const Run& run) -> flatbuffers::DetachedBuffer {
   params_builder.add_skygrid_tau_move_enabled(run.skygrid_tau_move_enabled());
   params_builder.add_skygrid_low_gamma_barrier_enabled(run.skygrid_low_gamma_barrier_enabled());
 
-  params_builder.add_log_posterior(run.log_G() + run.log_coalescent_prior() + run.log_other_priors());
+  if (run.has_calibrations()) {
+    params_builder.add_calibration_config(api_calibration_config);
+  }
+
+  if (writes_subst_model) {
+    params_builder.add_subst_model_code(api_subst_model_code);
+    params_builder.add_subst_frequency_mode(api_subst_frequency_mode);
+    params_builder.add_subst_class_rates(api_subst_class_rates);
+    params_builder.add_subst_exchangeability_prior(api_subst_exchangeability_prior);
+  }
+
+  if (run.has_site_partitions()) {
+    params_builder.add_site_partition_config(api_site_partition_config);
+    params_builder.add_site_partition_rates(api_site_partition_rates);
+    params_builder.add_site_partition_rate_move_enabled(run.site_partition_rate_move_enabled());
+    params_builder.add_site_partition_rate_prior_concentration(run.site_partition_rate_prior_concentration());
+  }
+
+  if (opt_in_features) {
+    params_builder.add_exact_coalescent_correction(run.exact_coalescent_correction());
+    params_builder.add_coal_prior_fixed_t_step(run.coal_prior_fixed_t_step());
+    params_builder.add_global_scale_move_enabled(run.global_scale_move_enabled());
+    if (run.global_scale_move_enabled()) {
+      params_builder.add_global_scale_move_window(run.global_scale_move_window());
+      params_builder.add_global_scale_moves_per_global_move(run.global_scale_moves_per_global_move());
+    }
+    params_builder.add_prng_state(api_prng_state);
+    params_builder.add_sub_prng_states(api_sub_prng_states);
+    if (not api_stencil_cut_points.IsNull()) { params_builder.add_partition_stencil_cut_points(api_stencil_cut_points); }
+    params_builder.add_partition_stencil_refresh_step(stencil_refresh_step);
+  }
+
+  params_builder.add_log_posterior(
+      run.log_G() + run.log_coalescent_prior() + run.log_other_priors() + run.log_calibration_prior());
   params_builder.add_log_other_priors(run.log_other_priors());
   params_builder.add_log_coalescent_prior(run.log_coalescent_prior());
   params_builder.add_log_G(run.log_G());
@@ -321,6 +414,15 @@ auto apply_api_params_to_run(const uint8_t* params_fb, Run& run) -> void {
   // FIXME: Make more things settable, e.g. coalescent prior staircase resolution
   auto api_params = flatbuffers::GetSizePrefixedRoot<api::Params>(params_fb);
 
+  // Clear any calibrations first: they constrain which other settings are legal (a calibrated run must
+  // keep its topology fixed), and the restored configuration is applied at the end of this function.
+  run.set_calibrations(Calibration_set{});
+
+  // The opt-in sampler features are switched off first, because each constrains the settings below (the joint time-scale move
+  // needs the exact correction, which needs the pinned grid and a fixed topology); the saved configuration is applied at the end.
+  run.set_global_scale_move_enabled(false);
+  run.set_exact_coalescent_correction(false);
+
   run.set_step(api_params->step());
   run.set_local_moves_per_global_move(api_params->num_local_moves_per_global_move());
   run.set_num_parts(api_params->num_parts());
@@ -334,11 +436,43 @@ auto apply_api_params_to_run(const uint8_t* params_fb, Run& run) -> void {
   } else {
     run.set_nu(std::vector<double>(run.tree().num_sites(), 1.0));
   }
-  run.set_hky_kappa(api_params->hky_kappa());
-  run.set_hky_pi({api_params->hky_pi_A(),
-                  api_params->hky_pi_C(),
-                  api_params->hky_pi_G(),
-                  api_params->hky_pi_T()});
+  // The substitution model.  An absent or empty code means HKY85 with estimated frequencies, which is
+  // what every file written before these fields existed holds; `hky_kappa` then carries the transition
+  // rate as it always did.
+  if (api_params->subst_model_code() != nullptr && api_params->subst_model_code()->size() > 0) {
+    auto model = Subst_model{};
+    model.grouping = Exchangeability_grouping::from_code(api_params->subst_model_code()->str());
+    model.frequency_mode = api_params->subst_frequency_mode() != nullptr
+        ? frequency_mode_from_string(api_params->subst_frequency_mode()->str())
+        : Frequency_mode::estimated;
+    model.reset_class_rates();
+    if (api_params->subst_class_rates() != nullptr) {
+      auto rates = std::vector<double>{};
+      for (auto r : *api_params->subst_class_rates()) { rates.push_back(r); }
+      if (std::ssize(rates) != model.grouping.num_classes()) {
+        throw std::invalid_argument(absl::StrFormat(
+            "The file carries %d exchangeability rates for the model code %s, which has %d classes",
+            rates.size(), model.grouping.code(), model.grouping.num_classes()));
+      }
+      model.class_rate = std::move(rates);
+    }
+    model.pi_a = Seq_vector<double>{api_params->hky_pi_A(),
+                                    api_params->hky_pi_C(),
+                                    api_params->hky_pi_G(),
+                                    api_params->hky_pi_T()};
+    if (api_params->subst_exchangeability_prior() != nullptr &&
+        api_params->subst_exchangeability_prior()->size() == 3) {
+      const auto* prior = api_params->subst_exchangeability_prior();
+      run.set_subst_exchangeability_prior(prior->Get(0), prior->Get(1), prior->Get(2));
+    }
+    run.set_subst_model(std::move(model));
+  } else {
+    run.set_hky_kappa(api_params->hky_kappa());
+    run.set_hky_pi({api_params->hky_pi_A(),
+                    api_params->hky_pi_C(),
+                    api_params->hky_pi_G(),
+                    api_params->hky_pi_T()});
+  }
 
   if (api_params->pop_model_type() == api::PopModel_NONE) {
     run.set_pop_model(std::make_shared<Exp_pop_model>(
@@ -413,11 +547,74 @@ auto apply_api_params_to_run(const uint8_t* params_fb, Run& run) -> void {
   run.set_skygrid_tau_move_enabled(api_params->skygrid_tau_move_enabled());
   run.set_skygrid_low_gamma_barrier_enabled(api_params->skygrid_low_gamma_barrier_enabled());
 
+  // Site partitions.  An absent or empty configuration means one partition covering every site, which is
+  // what every file written before this field existed means.  The configuration is re-resolved against the
+  // restored tree, which recomputes the weights from the tree; the rates are set afterwards and renormalized.
+  if (api_params->site_partition_config() != nullptr && api_params->site_partition_config()->size() > 0) {
+    auto iss = std::istringstream{api_params->site_partition_config()->str()};
+    run.set_site_partition(read_site_partition_config(iss));
+    if (api_params->site_partition_rates() != nullptr) {
+      auto rates = std::vector<double>{};
+      for (auto r : *api_params->site_partition_rates()) { rates.push_back(r); }
+      if (std::ssize(rates) != run.site_partition().num_partitions()) {
+        throw std::invalid_argument(absl::StrFormat(
+            "The file carries %d site-partition rates for %d partitions", rates.size(),
+            run.site_partition().num_partitions()));
+      }
+      run.set_site_partition_rates(std::move(rates));
+    }
+    run.set_site_partition_rate_prior_concentration(api_params->site_partition_rate_prior_concentration());
+    run.set_site_partition_rate_move_enabled(api_params->site_partition_rate_move_enabled());
+  }
+
+  // Age calibrations.  An absent or empty field means "no calibrations", which is also what every file
+  // written before this field existed means.  A configuration that no longer resolves against the
+  // restored tree throws Calibration_error rather than being dropped.
+  if (api_params->calibration_config() != nullptr && api_params->calibration_config()->size() > 0) {
+    auto iss = std::istringstream{api_params->calibration_config()->str()};
+    run.set_calibrations(read_calibration_config(iss));
+  }
+
+  // Opt-in sampler features.  Anything the restored configuration cannot support is refused by the setters (std::invalid_argument),
+  // never replaced by an approximation.
+  if (api_params->exact_coalescent_correction()) {
+    if (not (api_params->coal_prior_fixed_t_step() > 0.0)) {
+      throw std::invalid_argument("The file asks for the exact coalescent correction but does not give the pinned grid width");
+    }
+    run.set_coal_prior_fixed_t_step(api_params->coal_prior_fixed_t_step());
+    run.set_exact_coalescent_correction(true);
+  }
+  if (api_params->global_scale_move_enabled()) {
+    if (not api_params->exact_coalescent_correction()) {
+      throw std::invalid_argument("The file asks for the joint time-scale move without the exact coalescent correction");
+    }
+    run.set_global_scale_move_window(api_params->global_scale_move_window());
+    run.set_global_scale_moves_per_global_move(api_params->global_scale_moves_per_global_move());
+    run.set_global_scale_move_enabled(true);
+  }
+
   // Mpox hack
   run.set_mpox_hack_enabled(api_params->mpox_hack_enabled());
   if (api_params->mpox_hack_enabled()) {
     run.set_mpox_mu(api_params->mpox_mu());
     run.set_mpox_mu_star(api_params->mpox_mu_star());
+  }
+
+  // Random number generators and partition stencils, last: the setters above discard the stencil pool
+  if (api_params->prng_state() != nullptr && api_params->prng_state()->size() > 0) {
+    auto resume = Run::Resume_state{};
+    resume.prng = api_params->prng_state()->str();
+    if (api_params->sub_prng_states() != nullptr) {
+      for (const auto* sub : *api_params->sub_prng_states()) { resume.sub_prngs.push_back(sub->str()); }
+    }
+    if (api_params->partition_stencil_cut_points() != nullptr) {
+      auto current = std::vector<Node_index>{};
+      for (auto cut_point : *api_params->partition_stencil_cut_points()) {
+        if (cut_point == -1) { resume.stencils.push_back(std::move(current)); current = {}; } else { current.push_back(cut_point); }
+      }
+    }
+    resume.stencil_refresh_step = api_params->partition_stencil_refresh_step();
+    run.restore_resume_state(resume);
   }
 
   // Derived quantities not settable
@@ -535,7 +732,7 @@ auto api_export_mcc_tree(const Mcc_tree& tree, bool inner_nodes_defined_as_mrcas
       }
       if (tree.at(node).is_tip()) {
         const auto& base_tree = *tree.base_trees().front();
-        ss << base_tree.at(node).name;
+        ss << newick_label(base_tree.at(node).name);
       } else {
         ss << absl::StreamFormat("NODE_%07d", node);
       }

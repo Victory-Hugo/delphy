@@ -87,7 +87,7 @@ static auto print_stats_line(const Run& run) -> void {
   if (not run.mpox_hack_enabled()) {
     std::cerr << absl::StreamFormat("mu = %.2g * 10^-3 subst / site / year, ", run.mu() * 365 * 1000)
               << absl::StreamFormat("M_ts = %d, M_tv = %d, ", M_ts, run.num_muts() - M_ts)
-              << absl::StreamFormat("kappa = %.3g, ", run.hky_kappa())
+              << subst_model_summary(run.subst_model())
               << absl::StreamFormat("pi = [%.2g, %.2g, %.2g, %.2g], ",
                                     run.hky_pi()[A],
                                     run.hky_pi()[C],
@@ -149,6 +149,7 @@ auto cli_main_loop(Processed_cmd_line& c) -> int {
     }
     beasty_trees_output = std::make_unique<Beasty_trees_output>(os_ptr.get(), c.beast_version, true);
     os_ptr.release();
+    beasty_trees_output->set_significant_digits(c.trees_significant_digits);
     beasty_trees_output->output_headers(*c.run);
   }
   auto delphy_output = std::unique_ptr<Delphy_output>{};
@@ -202,6 +203,84 @@ auto cli_main_loop(Processed_cmd_line& c) -> int {
       if (timestamps.size() > k_max_timestamps) {
         timestamps.pop_front();
       }
+    }
+  }
+
+  {
+    static constexpr const char* k_move_names[k_num_move_kinds] = {
+        "inner_node_displace", "tip_displace", "branch_reform", "subtree_slide", "spr1",
+        "branch_history_gibbs", "node_state_gibbs", "node_time_marginal"};
+    std::cerr << "\nLocal move diagnostics (" << (c.run->topology_moves_enabled() ? "topology moves enabled"
+                                                                                : "topology fixed") << "):\n";
+    for (auto k = 0; k != k_num_move_kinds; ++k) {
+      const auto& counts = c.run->move_counts()[k];
+      std::cerr << absl::StreamFormat(
+          "  %-20s selected %12d, accepted %12d (%.2f%%), blocked by fixed topology %12d\n",
+          k_move_names[k], counts.proposed, counts.accepted,
+          counts.proposed > 0 ? 100.0 * counts.accepted / counts.proposed : 0.0,
+          counts.blocked_by_fixed_topology);
+    }
+
+    if (c.run->pop_size_moves_proposed() > 0 || c.run->pop_growth_rate_moves_proposed() > 0) {
+      std::cerr << "\nPopulation move diagnostics:\n";
+      std::cerr << absl::StreamFormat(
+          "  final pop size      proposed %12d, accepted %12d (%.4f%%)\n",
+          c.run->pop_size_moves_proposed(), c.run->pop_size_moves_accepted(),
+          c.run->pop_size_moves_proposed() > 0
+              ? 100.0 * c.run->pop_size_moves_accepted() / c.run->pop_size_moves_proposed() : 0.0);
+      std::cerr << absl::StreamFormat(
+          "  growth rate         proposed %12d, accepted %12d (%.4f%%), outside bounds %12d\n",
+          c.run->pop_growth_rate_moves_proposed(), c.run->pop_growth_rate_moves_accepted(),
+          c.run->pop_growth_rate_moves_proposed() > 0
+              ? 100.0 * c.run->pop_growth_rate_moves_accepted() / c.run->pop_growth_rate_moves_proposed() : 0.0,
+          c.run->pop_growth_rate_moves_out_of_bounds());
+    }
+
+    // A Gibbs update has no acceptance rate; what matters is how much history it moved.
+    const auto& g = c.run->history_gibbs_stats();
+    if (g.branch_updates_proposed > 0 || g.node_updates_proposed > 0 || g.site_refreshes > 0) {
+      std::cerr << "\nSingle-site history Gibbs diagnostics:\n";
+      std::cerr << absl::StreamFormat(
+          "  branch-history updates  %12d, of which the site was present %12d (%.2f%%)\n",
+          g.branch_updates_proposed, g.branch_updates_performed,
+          g.branch_updates_proposed > 0
+              ? 100.0 * g.branch_updates_performed / g.branch_updates_proposed : 0.0);
+      std::cerr << absl::StreamFormat(
+          "  node-state updates      %12d, of which the site was present %12d (%.2f%%), state changed %12d (%.2f%%)\n",
+          g.node_updates_proposed, g.node_updates_performed,
+          g.node_updates_proposed > 0 ? 100.0 * g.node_updates_performed / g.node_updates_proposed : 0.0,
+          g.node_states_changed,
+          g.node_updates_performed > 0 ? 100.0 * g.node_states_changed / g.node_updates_performed : 0.0);
+      std::cerr << absl::StreamFormat("  whole-site refreshes    %12d\n", g.site_refreshes);
+      std::cerr << absl::StreamFormat(
+          "  substitution events removed %12d, created %12d, net %+12d\n",
+          g.events_removed, g.events_created, g.events_created - g.events_removed);
+    }
+
+    if (c.run->threshold_partitioning() && c.run->threshold_partitions_drawn() > 0) {
+      auto drawn = c.run->threshold_partitions_drawn();
+      std::cerr << absl::StreamFormat(
+          "\nThreshold partitioning: partitions drawn %12d, single-part draws %12d (%.2f%%), mean parts %.2f\n",
+          drawn, c.run->threshold_partitions_single_part(),
+          100.0 * c.run->threshold_partitions_single_part() / drawn,
+          static_cast<double>(c.run->threshold_partition_parts_drawn()) / drawn);
+      for (auto k = 0; k != k_num_move_kinds; ++k) {
+        const auto& counts = c.run->move_counts()[k];
+        if (counts.blocked_by_partition == 0) { continue; }
+        std::cerr << absl::StreamFormat("  %-20s blocked by the partition %12d (%.2f%% of selections)\n",
+                                        k_move_names[k], counts.blocked_by_partition,
+                                        100.0 * counts.blocked_by_partition / counts.proposed);
+      }
+    }
+
+    // With the exact coalescent correction on, a whole batch of local moves is accepted or rolled
+    // back as one, so the batch acceptance bounds how much of any local move survives.
+    auto batches = c.run->exact_coalescent_batches_proposed();
+    if (batches > 0) {
+      std::cerr << absl::StreamFormat(
+          "\nExact coalescent correction: batches proposed %12d, accepted %12d (%.2f%%)\n",
+          batches, c.run->exact_coalescent_batches_accepted(),
+          100.0 * c.run->exact_coalescent_batches_accepted() / batches);
     }
   }
 

@@ -4,6 +4,7 @@
 
 #include "phylo_tree_calc.h"
 #include "io.h"
+#include "newick.h"
 #include "dates.h"
 
 namespace delphy {
@@ -31,6 +32,42 @@ class Beasty_log_output_version_impl {
   virtual auto output_log(std::ostream& /*os*/, const Run& /*run*/) -> void {};
   virtual auto output_footers(std::ostream& /*os*/, const Run& /*run*/) -> void {};
 };
+
+// The name of a free exchangeability class: its members joined by an underscore, e.g. "AG_CT".
+static auto exchangeability_class_name(const Exchangeability_grouping& grouping, int k) -> std::string {
+  auto out = std::string{};
+  for (auto index : grouping.members_of(k)) {
+    if (not out.empty()) { out += '_'; }
+    out += exchangeability_name(index);
+  }
+  return out;
+}
+
+// One column per free exchangeability.  The HKY85 grouping keeps the historical single `kappa`
+// column, so the log of a default run is unchanged.
+static auto output_subst_model_headers(std::ostream& os, const Run& run) -> void {
+  if (run.is_hky()) {
+    os << "kappa\t";
+    return;
+  }
+  const auto& grouping = run.subst_model().grouping;
+  for (auto k = 0; k != grouping.num_classes(); ++k) {
+    if (k == grouping.reference_class()) { continue; }
+    os << "rate(" << exchangeability_class_name(grouping, k) << ")\t";
+  }
+}
+
+static auto output_subst_model_values(std::ostream& os, const Run& run) -> void {
+  if (run.is_hky()) {
+    os << run.hky_kappa() << "\t";
+    return;
+  }
+  const auto& model = run.subst_model();
+  for (auto k = 0; k != model.grouping.num_classes(); ++k) {
+    if (k == model.grouping.reference_class()) { continue; }
+    os << model.class_rate[k] << "\t";
+  }
+}
 
 static auto output_skygrid_headers(std::ostream& os, const Skygrid_pop_model& pop_model) -> void {
   // Even though we don't support BEAST2 XML input files with Skygrid, having the Skygrid results in the
@@ -80,7 +117,7 @@ class Beasty_log_output_2_x_x : public Beasty_log_output_version_impl {
       if (run.alpha_move_enabled()) {
         os << "gammaShape\t";
       }
-      os << "kappa\t";
+      output_subst_model_headers(os, run);
       os << "Coalescent\t";
       
       const auto& pop_model = run.pop_model();
@@ -111,6 +148,13 @@ class Beasty_log_output_2_x_x : public Beasty_log_output_version_impl {
                                    tree.at(node).name);
           os << absl::StreamFormat("height(%s)\t",
                                    tree.at(node).name);
+        }
+      }
+      // Only when age calibrations are in use, so that uncalibrated runs log exactly what they did before
+      if (run.has_calibrations()) {
+        os << "logP(calibrations)\t";
+        for (const auto& c : run.calibrations().calibrations) {
+          os << absl::StreamFormat("calAge(%s)\t", c.name);
         }
       }
       os << "\n";
@@ -161,7 +205,8 @@ class Beasty_log_output_2_x_x : public Beasty_log_output_version_impl {
   
     // We don't incrementally update or cache the value of the priors other than log_coalescent_prior
     auto log_other_priors = run.calc_cur_log_other_priors();
-    auto log_prior = run.calc_cur_log_coalescent_prior() + log_other_priors;
+    // Zero unless age calibrations are in use, so uncalibrated output is unchanged
+    auto log_prior = run.calc_cur_log_coalescent_target() + log_other_priors + run.log_calibration_prior();
     
     if (not run.mpox_hack_enabled()) {
       // WARNING: Ensure this matches the logger output from export_beast_2_x_x_input (beasty_input.cpp)
@@ -182,7 +227,7 @@ class Beasty_log_output_2_x_x : public Beasty_log_output_version_impl {
       if (run.alpha_move_enabled()) {
         os << run.alpha() << "\t";
       }
-      os << run.hky_kappa() << "\t";
+      output_subst_model_values(os, run);
 
       // Coalescent prior has units of (1/time)^(# coalescences)
       // We measure time in days since 2020; ref BEAST run in years since time of latest tip
@@ -224,7 +269,16 @@ class Beasty_log_output_2_x_x : public Beasty_log_output_version_impl {
              << absl::StreamFormat("%.5f\t", to_linear_year(tree.at(node).t));
         }
       }
-      
+
+      if (run.has_calibrations()) {
+        os << absl::StreamFormat("%.6f\t", run.log_calibration_prior());
+        const auto& nodes = run.calibration_nodes();
+        for (auto i = 0; i != run.calibrations().size(); ++i) {
+          const auto& c = run.calibrations().calibrations[i];
+          os << absl::StreamFormat("%.4f\t", c.age_of(tree.at(nodes[i]).t));
+        }
+      }
+
       os << "\n";
   
     } else {  // mpox_hack_enabled == true
@@ -301,8 +355,8 @@ class Beasty_log_output_X_10_5_0 : public Beasty_log_output_version_impl {
       std::cerr << "ERROR (output_headers): Unrecognized population model type " << typeid(pop_model).name() << '\n';
     }
 
-    os << "kappa\t"
-       << "frequencies1\t"
+    output_subst_model_headers(os, run);
+    os << "frequencies1\t"
        << "frequencies2\t"
        << "frequencies3\t"
        << "frequencies4\t";
@@ -325,6 +379,25 @@ class Beasty_log_output_X_10_5_0 : public Beasty_log_output_version_impl {
     for (const auto& node : index_order_traversal(tree)) {
       if (tree.at(node).is_tip() && tree.at(node).t_min != tree.at(node).t_max) {
         os << absl::StreamFormat("age(%s)\t", tree.at(node).name);
+      }
+    }
+
+    // Only when age calibrations are in use, so that uncalibrated runs log exactly what they did before.
+    // `calAge(X)` is the age of the MRCA of calibration X's sample set, in years before that
+    // calibration's own reference instant.
+    if (run.has_calibrations()) {
+      os << "logP(calibrations)\t";
+      for (const auto& c : run.calibrations().calibrations) {
+        os << absl::StreamFormat("calAge(%s)\t", c.name);
+      }
+    }
+
+    // Only when site partitions are in use, so that single-partition runs log exactly what they did
+    // before.  `partitionRate(X)` is the relative rate of partition X; the weighted mean of these is 1
+    // by construction, and `clock.rate` times the rate is the partition's substitution rate.
+    if (run.has_site_partitions()) {
+      for (const auto& name : run.site_partition().names) {
+        os << absl::StreamFormat("partitionRate(%s)\t", name);
       }
     }
 
@@ -360,7 +433,8 @@ class Beasty_log_output_X_10_5_0 : public Beasty_log_output_version_impl {
   
     // We don't incrementally update or cache the value of the priors other than log_coalescent_prior
     auto log_other_priors = run.calc_cur_log_other_priors();
-    auto log_prior = run.calc_cur_log_coalescent_prior() + log_other_priors;
+    // Zero unless age calibrations are in use, so uncalibrated output is unchanged
+    auto log_prior = run.calc_cur_log_coalescent_target() + log_other_priors + run.log_calibration_prior();
     
     // WARNING: Ensure this matches the logger output from export_beast_X_10_5_0_input (beasty_input.cpp)
     
@@ -394,7 +468,7 @@ class Beasty_log_output_X_10_5_0 : public Beasty_log_output_version_impl {
       output_skygrid_results(os, run, skygrid_pop_model);
     }
     
-    os << run.hky_kappa() << "\t";
+    output_subst_model_values(os, run);
     
     os << run.hky_pi()[Real_seq_letter::A] << "\t"
        << run.hky_pi()[Real_seq_letter::C] << "\t"
@@ -420,6 +494,18 @@ class Beasty_log_output_X_10_5_0 : public Beasty_log_output_version_impl {
       if (tree.at(node).is_tip() && tree.at(node).t_min != tree.at(node).t_max) {
         os << absl::StreamFormat("%g\t", delta_linear_years(tree.at(node).t, beast_t0));
       }
+    }
+
+    if (run.has_calibrations()) {
+      os << absl::StreamFormat("%.6f\t", run.log_calibration_prior());
+      const auto& nodes = run.calibration_nodes();
+      for (auto i = 0; i != run.calibrations().size(); ++i) {
+        os << absl::StreamFormat("%.4f\t", run.calibrations().calibrations[i].age_of(tree.at(nodes[i]).t));
+      }
+    }
+
+    if (run.has_site_partitions()) {
+      for (auto rate : run.site_partition_rates()) { os << absl::StreamFormat("%.6g\t", rate); }
     }
 
     os << run.log_G() << "\t"  // log(G) instead of log_likelihood (which we don't calculate!)
@@ -500,17 +586,22 @@ Beasty_trees_output::~Beasty_trees_output() {
   }
 }
 
-auto Beasty_trees_output::output_headers(const Run& run) -> void {
-  const auto& tree = run.tree();
-  auto num_tips = (std::ssize(tree) + 1) / 2;
+auto beasty_tip_indices(const Phylo_tree& tree) -> Node_vector<Node_index> {
+  auto result = Node_vector<Node_index>(std::ssize(tree), k_no_node);
   auto next_tip = Node_index{1};
-  node_to_tip_.assign(std::ssize(tree), k_no_node);
   for (const auto& node : index_order_traversal(tree)) {
     if (tree.at(node).is_tip()) {
-      node_to_tip_[node] = next_tip;
+      result[node] = next_tip;
       ++next_tip;
     }
   }
+  return result;
+}
+
+auto Beasty_trees_output::output_headers(const Run& run) -> void {
+  const auto& tree = run.tree();
+  auto num_tips = (std::ssize(tree) + 1) / 2;
+  node_to_tip_ = beasty_tip_indices(tree);
 
   *os_ << "#NEXUS\n"
        << stamp_version_into_log_file{run}
@@ -521,7 +612,7 @@ auto Beasty_trees_output::output_headers(const Run& run) -> void {
   
   for (const auto& node : index_order_traversal(tree)) {
     if (tree.at(node).is_tip()) {
-      *os_ << "            " << tree.at(node).name << "\n";
+      *os_ << "            " << newick_label(tree.at(node).name) << "\n";
     }
   }
 
@@ -538,7 +629,7 @@ auto Beasty_trees_output::output_headers(const Run& run) -> void {
       } else {
         *os_ << ",\n";
       }
-      *os_ << absl::StrFormat("        %4d %s", node_to_tip_[node], tree.at(node).name);
+      *os_ << absl::StrFormat("        %4d %s", node_to_tip_[node], newick_label(tree.at(node).name));
     }
   }
   *os_ << "\n";
@@ -560,7 +651,22 @@ auto Beasty_trees_output::flush() -> void {
   os_->flush();
 }
 
+auto Beasty_trees_output::set_significant_digits(int digits) -> void {
+  CHECK_GE(digits, 1);
+  CHECK_LE(digits, 17);  // 17 significant digits round-trip every IEEE 754 double
+  significant_digits_ = digits;
+}
+
 auto Beasty_trees_output::output_newick_tree(const Phylo_tree& tree) -> void {
+  write_beasty_newick_tree(tree, node_to_tip_, significant_digits_, *os_);
+}
+
+auto write_beasty_newick_tree(
+    const Phylo_tree& tree,
+    const Node_vector<Node_index>& node_to_tip,
+    int significant_digits,
+    std::ostream& os)
+    -> void {
   //
   // BEAST X and BEAST2 differ slightly in tree output:
   //
@@ -580,24 +686,24 @@ auto Beasty_trees_output::output_newick_tree(const Phylo_tree& tree) -> void {
     if (children_so_far == 0) {
       // Entering `node`
       if (tree.at(node).is_inner_node()) {
-        *os_ << "(";
+        os << "(";
       }
     }
 
     if (children_so_far > 0 && children_so_far < std::ssize(tree.at(node).children)) {
       // In between two children of an inner node
-      *os_ << ",";
+      os << ",";
     }
 
     if (children_so_far == std::ssize(tree.at(node).children)) {
       // Exiting `node`
       if (tree.at(node).is_inner_node()) {
-        *os_ << ")";
+        os << ")";
       }
       if (tree.at(node).is_tip()) {
-        *os_ << node_to_tip_[node];
+        os << node_to_tip[node];
       }
-      *os_ << ":";
+      os << ":";
 
       auto t_parent = (node == tree.root ? tree.at_root().t : tree.at_parent_of(node).t);
       
@@ -605,18 +711,19 @@ auto Beasty_trees_output::output_newick_tree(const Phylo_tree& tree) -> void {
       auto mutations = std::vector<std::string>{};
       for (const auto& m : tree.at(node).mutations) {
         mutations.push_back(absl::StrFormat(
-            "%c%d%c,%g", to_char(m.from), m.site+1, to_char(m.to), (m.t - t_parent) / 365.0));  // years!
+            "%c%d%c,%.*g", to_char(m.from), m.site+1, to_char(m.to),
+            significant_digits, (m.t - t_parent) / 365.0));  // years!
       }
       if (not mutations.empty()) {
-        *os_ << "[&mutations={" << absl::StrJoin(mutations, ",") << "}]";
+        os << "[&mutations={" << absl::StrJoin(mutations, ",") << "}]";
       }
       
       // Days (internal) -> Years (output)
-      *os_ << (tree.at(node).t - t_parent) / 365.0;
+      os << absl::StrFormat("%.*g", significant_digits, (tree.at(node).t - t_parent) / 365.0);
     }
     
   }
-  *os_ << ";";
+  os << ";";
 }
 
 }  // namespace delphy

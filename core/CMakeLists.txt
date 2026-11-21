@@ -4,13 +4,24 @@ add_library(delphy_core
   api.cpp  # See top of api.fbs for how to regenerate api_generated.h
   beasty_input.cpp
   beasty_output.cpp
+  calibration.cpp
+  calibration_init.cpp
+  clade_summary.cpp
   cmdline.cpp
   coalescent.cpp
+  coalescent_grid.cpp
+  exact_coalescent.cpp
+  ctmc_bridge.cpp
   dates.cpp
   delphy_output.cpp
   evo_hky.cpp
   evo_model.cpp
+  evo_subst_model.cpp
+  external_tree.cpp
   generic_tree_prober.cpp
+  human_dates.cpp
+  history_gibbs.cpp
+  human_input.cpp
   incremental_mcc_tree.cpp
   io.cpp
   mcc_tree.cpp
@@ -18,7 +29,9 @@ add_library(delphy_core
   phylo_tree.cpp
   phylo_tree_calc.cpp
   pop_model.cpp
+  posterior_stats.cpp
   run.cpp
+  site_partition.cpp
   scalable_coalescent.cpp
   scratch_space.cpp
   sequence_utils.cpp

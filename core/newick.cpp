@@ -4,6 +4,10 @@
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_split.h>
 
+#include <algorithm>
+#include <cstring>
+#include <sstream>
+
 namespace delphy {
 
 // Newick tree grammar (ANTLR v4):
@@ -56,7 +60,7 @@ namespace delphy {
 //ATTRIBUTES     : '[&' .*? ']' ;  // before COMMENT to recognize "[&hello]" as an ATTRIBUTES instead of a COMMENT
 //COMMENT        : '[' .*? ']' -> skip ;
 //NUMBER         : [+-]? [0-9]+ ('.' [0-9]+)? ([eE] [+-]? [0-9]+)? ;
-//UNQUOTED_LABEL : (~[ \r\n\t()[\]':;,])+ ;  // Note: unlike spec, an unquoted label cannot begin with a digit
+//UNQUOTED_LABEL : (~[ \r\n\t()[\]':;,])+ ;  // A maximal run that matches NUMBER is lexed as a NUMBER
 //QUOTED_LABEL   : '\'' ([^'] | '\'\'')* '\'';
 
 auto Newick_lexer::to_string(Newick_lexer::Token_kind token_kind) -> std::string_view {
@@ -107,7 +111,7 @@ auto Newick_lexer::get() -> Newick_lexer::int_type {
 //ATTRIBUTES     : '[&' .*? ']' ;  // before COMMENT to recognize "[&hello]" as an ATTRIBUTES instead of a COMMENT
 //COMMENT        : '[' .*? ']' -> skip ;
 //NUMBER         : [+-]? [0-9]+ ('.' [0-9]+)? ([eE] [+-]? [0-9]+)? ;
-//UNQUOTED_LABEL : (~[ \r\n\t()[\]':;,])+ ;  // Note: unlike spec, an unquoted label cannot begin with a digit
+//UNQUOTED_LABEL : (~[ \r\n\t()[\]':;,])+ ;  // A maximal run that matches NUMBER is lexed as a NUMBER
 //QUOTED_LABEL   : '\'' ([^'] | '\'\'')* '\'';
 //
 auto Newick_lexer::lex_next_token() -> Newick_lexer::Token_kind {
@@ -152,11 +156,8 @@ auto Newick_lexer::lex_next_token() -> Newick_lexer::Token_kind {
         return lex_quoted_label() ? Token_kind::k_quoted_label : Token_kind::k_invalid;
 
       default:
-        if (std::isdigit(peek_c) || peek_c == '-' || peek_c == '+') {
-          return lex_number() ? Token_kind::k_number : Token_kind::k_invalid;
-        } else {
-          return lex_unquoted_label() ? Token_kind::k_unquoted_label : Token_kind::k_invalid;
-        }
+        if (not lex_unquoted_label()) { return Token_kind::k_invalid; }
+        return is_number(lexeme_) ? Token_kind::k_number : Token_kind::k_unquoted_label;
     }
   }
 }
@@ -180,22 +181,26 @@ auto Newick_lexer::lex_whitespace() -> bool {
 }
 
 //NUMBER         : [+-]? [0-9]+ ('.' [0-9]+)? ([eE] [+-]? [0-9]+)? ;
-auto Newick_lexer::lex_number() -> bool {
-  if (peek_c == '-' || peek_c == '+') { get(); }
-  if (!std::isdigit(peek_c)) { return false; }
-  while (std::isdigit(peek_c)) { get(); }
-  if (peek_c == '.') {
-    get();
-    if (!std::isdigit(peek_c)) { return false; }
-    while (std::isdigit(peek_c)) { get(); }
+auto Newick_lexer::is_number(std::string_view s) -> bool {
+  auto i = std::size_t{0};
+  auto digit = [&]() { return i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])); };
+  auto digits = [&]() {
+    if (not digit()) { return false; }
+    while (digit()) { ++i; }
+    return true;
+  };
+  if (i < s.size() && (s[i] == '-' || s[i] == '+')) { ++i; }
+  if (not digits()) { return false; }
+  if (i < s.size() && s[i] == '.') {
+    ++i;
+    if (not digits()) { return false; }
   }
-  if (peek_c == 'e' || peek_c == 'E') {
-    get();
-    if (peek_c == '-' || peek_c == '+') { get(); }
-    if (!std::isdigit(peek_c)) { return false; }
-    while (std::isdigit(peek_c)) { get(); }
+  if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+    ++i;
+    if (i < s.size() && (s[i] == '-' || s[i] == '+')) { ++i; }
+    if (not digits()) { return false; }
   }
-  return true;
+  return i == s.size();
 }
 
 //QUOTED_LABEL   : '\'' ([^'] | '\'\'')* '\'';
@@ -215,7 +220,7 @@ auto Newick_lexer::lex_quoted_label() -> bool {
   }
 }
 
-//UNQUOTED_LABEL : (~[ \r\n\t()[\]':;,])+ ;  // Note: unlike spec, an unquoted label cannot begin with a digit
+//UNQUOTED_LABEL : (~[ \r\n\t()[\]':;,])+ ;
 auto Newick_lexer::lex_unquoted_label() -> bool {
   auto empty = true;
   while (true) {
@@ -232,6 +237,7 @@ auto Newick_lexer::lex_unquoted_label() -> bool {
       case ':':
       case ';':
       case ',':
+      case eof:
         return not empty;
       default:
         get();
@@ -251,10 +257,49 @@ auto Newick_lexer::lex_comment_or_attributes() -> bool {
 }
 
 static auto unquote(std::string_view quoted_label) -> std::string {
-  assert(quoted_label.starts_with('\'') && quoted_label.ends_with('\''));
+  assert(quoted_label.size() >= 2 && quoted_label.starts_with('\'') && quoted_label.ends_with('\''));
   auto unquoted_label = std::string{quoted_label.substr(1, quoted_label.size() - 2)};
   boost::replace_all(unquoted_label, "\'\'", "\'");
   return unquoted_label;
+}
+
+static auto is_newick_delimiter(char c) -> bool {
+  return std::strchr(" \r\n\t()[]':;,", c) != nullptr;
+}
+
+auto newick_label(std::string_view name) -> std::string {
+  if (not name.empty() && std::ranges::none_of(name, is_newick_delimiter)) {
+    return std::string{name};
+  }
+  auto result = std::string{"'"};
+  for (auto c : name) {
+    if (c == '\'') { result += '\''; }
+    result += c;
+  }
+  result += '\'';
+  return result;
+}
+
+auto parse_newick_label(std::string_view label) -> std::string {
+  auto is = std::istringstream{std::string{label}};
+  auto lexer = Newick_lexer{is};
+  auto kind = lexer.next_token();
+  auto result = std::string{};
+  switch (kind) {
+    case Newick_lexer::Token_kind::k_quoted_label:
+      result = unquote(lexer.lexeme());
+      break;
+    case Newick_lexer::Token_kind::k_unquoted_label:
+    case Newick_lexer::Token_kind::k_number:
+      result = std::string{lexer.lexeme()};
+      break;
+    default:
+      throw std::runtime_error(absl::StrFormat("Invalid Newick label '%s'", label));
+  }
+  if (lexer.next_token() != Newick_lexer::Token_kind::k_eof) {
+    throw std::runtime_error(absl::StrFormat("Invalid Newick label '%s'", label));
+  }
+  return result;
 }
 
 auto Newick_parser::match(Newick_lexer::Token_kind token_kind) -> void {
@@ -316,6 +361,7 @@ auto Newick_parser::parse_node(Newick_tree& tree, Node_index parent) -> Node_ind
     }
     case Newick_lexer::Token_kind::k_quoted_label: {
       tree.at(node).name = unquote(lexer_.lexeme());
+      lexer_.next_token();
       break;
     }
     default: {
@@ -339,6 +385,7 @@ auto Newick_parser::parse_node(Newick_tree& tree, Node_index parent) -> Node_ind
         throw std::runtime_error(absl::StrFormat(
             "Could not parse branch length '%s'", lexer_.lexeme()));
       }
+      tree.at(node).has_branch_length = true;
     }
     match(Newick_lexer::Token_kind::k_number);
   } else {

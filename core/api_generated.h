@@ -706,7 +706,25 @@ struct Params FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
     VT_POP_G_MIN = 92,
     VT_POP_G_MAX = 94,
     VT_SKYGRID_INV_NBAR_PRIOR_ALPHA = 96,
-    VT_SKYGRID_INV_NBAR_PRIOR_BETA = 98
+    VT_SKYGRID_INV_NBAR_PRIOR_BETA = 98,
+    VT_CALIBRATION_CONFIG = 100,
+    VT_EXACT_COALESCENT_CORRECTION = 102,
+    VT_COAL_PRIOR_FIXED_T_STEP = 104,
+    VT_GLOBAL_SCALE_MOVE_ENABLED = 106,
+    VT_GLOBAL_SCALE_MOVE_WINDOW = 108,
+    VT_GLOBAL_SCALE_MOVES_PER_GLOBAL_MOVE = 110,
+    VT_PRNG_STATE = 112,
+    VT_SUB_PRNG_STATES = 114,
+    VT_PARTITION_STENCIL_CUT_POINTS = 116,
+    VT_PARTITION_STENCIL_REFRESH_STEP = 118,
+    VT_SITE_PARTITION_CONFIG = 120,
+    VT_SITE_PARTITION_RATES = 122,
+    VT_SITE_PARTITION_RATE_MOVE_ENABLED = 124,
+    VT_SITE_PARTITION_RATE_PRIOR_CONCENTRATION = 126,
+    VT_SUBST_MODEL_CODE = 128,
+    VT_SUBST_FREQUENCY_MODE = 130,
+    VT_SUBST_CLASS_RATES = 132,
+    VT_SUBST_EXCHANGEABILITY_PRIOR = 134
   };
   int64_t step() const {
     return GetField<int64_t>(VT_STEP, 0);
@@ -859,6 +877,60 @@ struct Params FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
   double skygrid_inv_nbar_prior_beta() const {
     return GetField<double>(VT_SKYGRID_INV_NBAR_PRIOR_BETA, 0.0);
   }
+  const ::flatbuffers::String *calibration_config() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_CALIBRATION_CONFIG);
+  }
+  bool exact_coalescent_correction() const {
+    return GetField<uint8_t>(VT_EXACT_COALESCENT_CORRECTION, 0) != 0;
+  }
+  double coal_prior_fixed_t_step() const {
+    return GetField<double>(VT_COAL_PRIOR_FIXED_T_STEP, 0.0);
+  }
+  bool global_scale_move_enabled() const {
+    return GetField<uint8_t>(VT_GLOBAL_SCALE_MOVE_ENABLED, 0) != 0;
+  }
+  double global_scale_move_window() const {
+    return GetField<double>(VT_GLOBAL_SCALE_MOVE_WINDOW, 0.0);
+  }
+  int32_t global_scale_moves_per_global_move() const {
+    return GetField<int32_t>(VT_GLOBAL_SCALE_MOVES_PER_GLOBAL_MOVE, 0);
+  }
+  const ::flatbuffers::String *prng_state() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_PRNG_STATE);
+  }
+  const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *sub_prng_states() const {
+    return GetPointer<const ::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>> *>(VT_SUB_PRNG_STATES);
+  }
+  const ::flatbuffers::Vector<int32_t> *partition_stencil_cut_points() const {
+    return GetPointer<const ::flatbuffers::Vector<int32_t> *>(VT_PARTITION_STENCIL_CUT_POINTS);
+  }
+  int64_t partition_stencil_refresh_step() const {
+    return GetField<int64_t>(VT_PARTITION_STENCIL_REFRESH_STEP, -1LL);
+  }
+  const ::flatbuffers::String *site_partition_config() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SITE_PARTITION_CONFIG);
+  }
+  const ::flatbuffers::Vector<double> *site_partition_rates() const {
+    return GetPointer<const ::flatbuffers::Vector<double> *>(VT_SITE_PARTITION_RATES);
+  }
+  bool site_partition_rate_move_enabled() const {
+    return GetField<uint8_t>(VT_SITE_PARTITION_RATE_MOVE_ENABLED, 1) != 0;
+  }
+  double site_partition_rate_prior_concentration() const {
+    return GetField<double>(VT_SITE_PARTITION_RATE_PRIOR_CONCENTRATION, 1.0);
+  }
+  const ::flatbuffers::String *subst_model_code() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SUBST_MODEL_CODE);
+  }
+  const ::flatbuffers::String *subst_frequency_mode() const {
+    return GetPointer<const ::flatbuffers::String *>(VT_SUBST_FREQUENCY_MODE);
+  }
+  const ::flatbuffers::Vector<double> *subst_class_rates() const {
+    return GetPointer<const ::flatbuffers::Vector<double> *>(VT_SUBST_CLASS_RATES);
+  }
+  const ::flatbuffers::Vector<double> *subst_exchangeability_prior() const {
+    return GetPointer<const ::flatbuffers::Vector<double> *>(VT_SUBST_EXCHANGEABILITY_PRIOR);
+  }
   bool Verify(::flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int64_t>(verifier, VT_STEP, 8) &&
@@ -911,6 +983,35 @@ struct Params FLATBUFFERS_FINAL_CLASS : private ::flatbuffers::Table {
            VerifyField<double>(verifier, VT_POP_G_MAX, 8) &&
            VerifyField<double>(verifier, VT_SKYGRID_INV_NBAR_PRIOR_ALPHA, 8) &&
            VerifyField<double>(verifier, VT_SKYGRID_INV_NBAR_PRIOR_BETA, 8) &&
+           VerifyOffset(verifier, VT_CALIBRATION_CONFIG) &&
+           verifier.VerifyString(calibration_config()) &&
+           VerifyField<uint8_t>(verifier, VT_EXACT_COALESCENT_CORRECTION, 1) &&
+           VerifyField<double>(verifier, VT_COAL_PRIOR_FIXED_T_STEP, 8) &&
+           VerifyField<uint8_t>(verifier, VT_GLOBAL_SCALE_MOVE_ENABLED, 1) &&
+           VerifyField<double>(verifier, VT_GLOBAL_SCALE_MOVE_WINDOW, 8) &&
+           VerifyField<int32_t>(verifier, VT_GLOBAL_SCALE_MOVES_PER_GLOBAL_MOVE, 4) &&
+           VerifyOffset(verifier, VT_PRNG_STATE) &&
+           verifier.VerifyString(prng_state()) &&
+           VerifyOffset(verifier, VT_SUB_PRNG_STATES) &&
+           verifier.VerifyVector(sub_prng_states()) &&
+           verifier.VerifyVectorOfStrings(sub_prng_states()) &&
+           VerifyOffset(verifier, VT_PARTITION_STENCIL_CUT_POINTS) &&
+           verifier.VerifyVector(partition_stencil_cut_points()) &&
+           VerifyField<int64_t>(verifier, VT_PARTITION_STENCIL_REFRESH_STEP, 8) &&
+           VerifyOffset(verifier, VT_SITE_PARTITION_CONFIG) &&
+           verifier.VerifyString(site_partition_config()) &&
+           VerifyOffset(verifier, VT_SITE_PARTITION_RATES) &&
+           verifier.VerifyVector(site_partition_rates()) &&
+           VerifyField<uint8_t>(verifier, VT_SITE_PARTITION_RATE_MOVE_ENABLED, 1) &&
+           VerifyField<double>(verifier, VT_SITE_PARTITION_RATE_PRIOR_CONCENTRATION, 8) &&
+           VerifyOffset(verifier, VT_SUBST_MODEL_CODE) &&
+           verifier.VerifyString(subst_model_code()) &&
+           VerifyOffset(verifier, VT_SUBST_FREQUENCY_MODE) &&
+           verifier.VerifyString(subst_frequency_mode()) &&
+           VerifyOffset(verifier, VT_SUBST_CLASS_RATES) &&
+           verifier.VerifyVector(subst_class_rates()) &&
+           VerifyOffset(verifier, VT_SUBST_EXCHANGEABILITY_PRIOR) &&
+           verifier.VerifyVector(subst_exchangeability_prior()) &&
            verifier.EndTable();
   }
 };
@@ -1071,6 +1172,60 @@ struct ParamsBuilder {
   void add_skygrid_inv_nbar_prior_beta(double skygrid_inv_nbar_prior_beta) {
     fbb_.AddElement<double>(Params::VT_SKYGRID_INV_NBAR_PRIOR_BETA, skygrid_inv_nbar_prior_beta, 0.0);
   }
+  void add_calibration_config(::flatbuffers::Offset<::flatbuffers::String> calibration_config) {
+    fbb_.AddOffset(Params::VT_CALIBRATION_CONFIG, calibration_config);
+  }
+  void add_exact_coalescent_correction(bool exact_coalescent_correction) {
+    fbb_.AddElement<uint8_t>(Params::VT_EXACT_COALESCENT_CORRECTION, static_cast<uint8_t>(exact_coalescent_correction), 0);
+  }
+  void add_coal_prior_fixed_t_step(double coal_prior_fixed_t_step) {
+    fbb_.AddElement<double>(Params::VT_COAL_PRIOR_FIXED_T_STEP, coal_prior_fixed_t_step, 0.0);
+  }
+  void add_global_scale_move_enabled(bool global_scale_move_enabled) {
+    fbb_.AddElement<uint8_t>(Params::VT_GLOBAL_SCALE_MOVE_ENABLED, static_cast<uint8_t>(global_scale_move_enabled), 0);
+  }
+  void add_global_scale_move_window(double global_scale_move_window) {
+    fbb_.AddElement<double>(Params::VT_GLOBAL_SCALE_MOVE_WINDOW, global_scale_move_window, 0.0);
+  }
+  void add_global_scale_moves_per_global_move(int32_t global_scale_moves_per_global_move) {
+    fbb_.AddElement<int32_t>(Params::VT_GLOBAL_SCALE_MOVES_PER_GLOBAL_MOVE, global_scale_moves_per_global_move, 0);
+  }
+  void add_prng_state(::flatbuffers::Offset<::flatbuffers::String> prng_state) {
+    fbb_.AddOffset(Params::VT_PRNG_STATE, prng_state);
+  }
+  void add_sub_prng_states(::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> sub_prng_states) {
+    fbb_.AddOffset(Params::VT_SUB_PRNG_STATES, sub_prng_states);
+  }
+  void add_partition_stencil_cut_points(::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> partition_stencil_cut_points) {
+    fbb_.AddOffset(Params::VT_PARTITION_STENCIL_CUT_POINTS, partition_stencil_cut_points);
+  }
+  void add_partition_stencil_refresh_step(int64_t partition_stencil_refresh_step) {
+    fbb_.AddElement<int64_t>(Params::VT_PARTITION_STENCIL_REFRESH_STEP, partition_stencil_refresh_step, -1LL);
+  }
+  void add_site_partition_config(::flatbuffers::Offset<::flatbuffers::String> site_partition_config) {
+    fbb_.AddOffset(Params::VT_SITE_PARTITION_CONFIG, site_partition_config);
+  }
+  void add_site_partition_rates(::flatbuffers::Offset<::flatbuffers::Vector<double>> site_partition_rates) {
+    fbb_.AddOffset(Params::VT_SITE_PARTITION_RATES, site_partition_rates);
+  }
+  void add_site_partition_rate_move_enabled(bool site_partition_rate_move_enabled) {
+    fbb_.AddElement<uint8_t>(Params::VT_SITE_PARTITION_RATE_MOVE_ENABLED, static_cast<uint8_t>(site_partition_rate_move_enabled), 1);
+  }
+  void add_site_partition_rate_prior_concentration(double site_partition_rate_prior_concentration) {
+    fbb_.AddElement<double>(Params::VT_SITE_PARTITION_RATE_PRIOR_CONCENTRATION, site_partition_rate_prior_concentration, 1.0);
+  }
+  void add_subst_model_code(::flatbuffers::Offset<::flatbuffers::String> subst_model_code) {
+    fbb_.AddOffset(Params::VT_SUBST_MODEL_CODE, subst_model_code);
+  }
+  void add_subst_frequency_mode(::flatbuffers::Offset<::flatbuffers::String> subst_frequency_mode) {
+    fbb_.AddOffset(Params::VT_SUBST_FREQUENCY_MODE, subst_frequency_mode);
+  }
+  void add_subst_class_rates(::flatbuffers::Offset<::flatbuffers::Vector<double>> subst_class_rates) {
+    fbb_.AddOffset(Params::VT_SUBST_CLASS_RATES, subst_class_rates);
+  }
+  void add_subst_exchangeability_prior(::flatbuffers::Offset<::flatbuffers::Vector<double>> subst_exchangeability_prior) {
+    fbb_.AddOffset(Params::VT_SUBST_EXCHANGEABILITY_PRIOR, subst_exchangeability_prior);
+  }
   explicit ParamsBuilder(::flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1131,8 +1286,30 @@ inline ::flatbuffers::Offset<Params> CreateParams(
     double pop_g_min = 0.0,
     double pop_g_max = 0.0,
     double skygrid_inv_nbar_prior_alpha = 0.0,
-    double skygrid_inv_nbar_prior_beta = 0.0) {
+    double skygrid_inv_nbar_prior_beta = 0.0,
+    ::flatbuffers::Offset<::flatbuffers::String> calibration_config = 0,
+    bool exact_coalescent_correction = false,
+    double coal_prior_fixed_t_step = 0.0,
+    bool global_scale_move_enabled = false,
+    double global_scale_move_window = 0.0,
+    int32_t global_scale_moves_per_global_move = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> prng_state = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<::flatbuffers::Offset<::flatbuffers::String>>> sub_prng_states = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<int32_t>> partition_stencil_cut_points = 0,
+    int64_t partition_stencil_refresh_step = -1LL,
+    ::flatbuffers::Offset<::flatbuffers::String> site_partition_config = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<double>> site_partition_rates = 0,
+    bool site_partition_rate_move_enabled = true,
+    double site_partition_rate_prior_concentration = 1.0,
+    ::flatbuffers::Offset<::flatbuffers::String> subst_model_code = 0,
+    ::flatbuffers::Offset<::flatbuffers::String> subst_frequency_mode = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<double>> subst_class_rates = 0,
+    ::flatbuffers::Offset<::flatbuffers::Vector<double>> subst_exchangeability_prior = 0) {
   ParamsBuilder builder_(_fbb);
+  builder_.add_site_partition_rate_prior_concentration(site_partition_rate_prior_concentration);
+  builder_.add_partition_stencil_refresh_step(partition_stencil_refresh_step);
+  builder_.add_global_scale_move_window(global_scale_move_window);
+  builder_.add_coal_prior_fixed_t_step(coal_prior_fixed_t_step);
   builder_.add_skygrid_inv_nbar_prior_beta(skygrid_inv_nbar_prior_beta);
   builder_.add_skygrid_inv_nbar_prior_alpha(skygrid_inv_nbar_prior_alpha);
   builder_.add_pop_g_max(pop_g_max);
@@ -1167,9 +1344,23 @@ inline ::flatbuffers::Offset<Params> CreateParams(
   builder_.add_mu(mu);
   builder_.add_num_local_moves_per_global_move(num_local_moves_per_global_move);
   builder_.add_step(step);
+  builder_.add_subst_exchangeability_prior(subst_exchangeability_prior);
+  builder_.add_subst_class_rates(subst_class_rates);
+  builder_.add_subst_frequency_mode(subst_frequency_mode);
+  builder_.add_subst_model_code(subst_model_code);
+  builder_.add_site_partition_rates(site_partition_rates);
+  builder_.add_site_partition_config(site_partition_config);
+  builder_.add_partition_stencil_cut_points(partition_stencil_cut_points);
+  builder_.add_sub_prng_states(sub_prng_states);
+  builder_.add_prng_state(prng_state);
+  builder_.add_global_scale_moves_per_global_move(global_scale_moves_per_global_move);
+  builder_.add_calibration_config(calibration_config);
   builder_.add_pop_model(pop_model);
   builder_.add_nu(nu);
   builder_.add_num_parts(num_parts);
+  builder_.add_site_partition_rate_move_enabled(site_partition_rate_move_enabled);
+  builder_.add_global_scale_move_enabled(global_scale_move_enabled);
+  builder_.add_exact_coalescent_correction(exact_coalescent_correction);
   builder_.add_skygrid_low_gamma_barrier_enabled(skygrid_low_gamma_barrier_enabled);
   builder_.add_skygrid_tau_move_enabled(skygrid_tau_move_enabled);
   builder_.add_pop_model_type(pop_model_type);
@@ -1233,8 +1424,36 @@ inline ::flatbuffers::Offset<Params> CreateParamsDirect(
     double pop_g_min = 0.0,
     double pop_g_max = 0.0,
     double skygrid_inv_nbar_prior_alpha = 0.0,
-    double skygrid_inv_nbar_prior_beta = 0.0) {
+    double skygrid_inv_nbar_prior_beta = 0.0,
+    const char *calibration_config = nullptr,
+    bool exact_coalescent_correction = false,
+    double coal_prior_fixed_t_step = 0.0,
+    bool global_scale_move_enabled = false,
+    double global_scale_move_window = 0.0,
+    int32_t global_scale_moves_per_global_move = 0,
+    const char *prng_state = nullptr,
+    const std::vector<::flatbuffers::Offset<::flatbuffers::String>> *sub_prng_states = nullptr,
+    const std::vector<int32_t> *partition_stencil_cut_points = nullptr,
+    int64_t partition_stencil_refresh_step = -1LL,
+    const char *site_partition_config = nullptr,
+    const std::vector<double> *site_partition_rates = nullptr,
+    bool site_partition_rate_move_enabled = true,
+    double site_partition_rate_prior_concentration = 1.0,
+    const char *subst_model_code = nullptr,
+    const char *subst_frequency_mode = nullptr,
+    const std::vector<double> *subst_class_rates = nullptr,
+    const std::vector<double> *subst_exchangeability_prior = nullptr) {
   auto nu__ = nu ? _fbb.CreateVector<double>(*nu) : 0;
+  auto calibration_config__ = calibration_config ? _fbb.CreateString(calibration_config) : 0;
+  auto prng_state__ = prng_state ? _fbb.CreateString(prng_state) : 0;
+  auto sub_prng_states__ = sub_prng_states ? _fbb.CreateVector<::flatbuffers::Offset<::flatbuffers::String>>(*sub_prng_states) : 0;
+  auto partition_stencil_cut_points__ = partition_stencil_cut_points ? _fbb.CreateVector<int32_t>(*partition_stencil_cut_points) : 0;
+  auto site_partition_config__ = site_partition_config ? _fbb.CreateString(site_partition_config) : 0;
+  auto site_partition_rates__ = site_partition_rates ? _fbb.CreateVector<double>(*site_partition_rates) : 0;
+  auto subst_model_code__ = subst_model_code ? _fbb.CreateString(subst_model_code) : 0;
+  auto subst_frequency_mode__ = subst_frequency_mode ? _fbb.CreateString(subst_frequency_mode) : 0;
+  auto subst_class_rates__ = subst_class_rates ? _fbb.CreateVector<double>(*subst_class_rates) : 0;
+  auto subst_exchangeability_prior__ = subst_exchangeability_prior ? _fbb.CreateVector<double>(*subst_exchangeability_prior) : 0;
   return delphy::api::CreateParams(
       _fbb,
       step,
@@ -1284,7 +1503,25 @@ inline ::flatbuffers::Offset<Params> CreateParamsDirect(
       pop_g_min,
       pop_g_max,
       skygrid_inv_nbar_prior_alpha,
-      skygrid_inv_nbar_prior_beta);
+      skygrid_inv_nbar_prior_beta,
+      calibration_config__,
+      exact_coalescent_correction,
+      coal_prior_fixed_t_step,
+      global_scale_move_enabled,
+      global_scale_move_window,
+      global_scale_moves_per_global_move,
+      prng_state__,
+      sub_prng_states__,
+      partition_stencil_cut_points__,
+      partition_stencil_refresh_step,
+      site_partition_config__,
+      site_partition_rates__,
+      site_partition_rate_move_enabled,
+      site_partition_rate_prior_concentration,
+      subst_model_code__,
+      subst_frequency_mode__,
+      subst_class_rates__,
+      subst_exchangeability_prior__);
 }
 
 inline bool VerifyPopModel(::flatbuffers::Verifier &verifier, const void *obj, PopModel type) {

@@ -1,5 +1,6 @@
 #include "utree.h"
 
+#include <stdexcept>
 #include <cmath>
 #include <queue>
 #include <random>
@@ -1119,10 +1120,17 @@ static auto farthest_node_from(const Utree& tree, Node_index start)
 //    insert the root node.
 //
 // The focus location is undefined after this call.
-auto midpoint_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs)
+auto midpoint_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs,
+                         const Init_time_scale& time_scale)
     -> Rooting_info {
   auto N = tree.num_tips;
-  static constexpr auto lambda_fallback = 1.0 / 30.0;
+  if (time_scale.forbid_pathogen_fallback && not time_scale.fallback_lambda.has_value()) {
+    throw std::runtime_error(
+        "The tip dates give no usable root-to-tip regression, so the initial tree needs a substitution "
+        "rate, but none was specified.  Provide --v0-init-mutation-rate or a proper mutation-rate prior.");
+  }
+  auto lambda_fallback = time_scale.fallback_lambda.value_or(1.0 / 30.0);
+  CHECK_GT(lambda_fallback, 0.0);
 
   if (N == 0) {
     return {.root = k_no_node, .method = Rooting_method::midpoint,
@@ -1141,7 +1149,7 @@ auto midpoint_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs)
   CHECK(tree.is_tip(v));
 
   // Step 2: Compute timed midpoint position along the u→v path
-  auto lambda_rough = 1.0 / 30.0;  // ~1 mutation per 30 days
+  auto lambda_rough = lambda_fallback;  // pathogen default: ~1 mutation per 30 days
   auto t_u = static_cast<double>(tip_descs[u].t_min + tip_descs[u].t_max) / 2.0;
   auto t_v = static_cast<double>(tip_descs[v].t_min + tip_descs[v].t_max) / 2.0;
   auto M = static_cast<double>(D);
@@ -1254,12 +1262,13 @@ auto midpoint_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs)
 // See plans/2026-05-18-01-better-tree-init-round4-regression-rooting.md for full details.
 auto ols_regression_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs,
                                absl::BitGenRef bitgen,
-                               const std::function<void(int,int,int,int,int)>& progress_hook)
+                               const std::function<void(int,int,int,int,int)>& progress_hook,
+                               const Init_time_scale& time_scale)
     -> Rooting_info {
   auto N = tree.num_tips;
   auto Nd = static_cast<double>(N);
 
-  if (N <= 2) { return midpoint_root_utree(tree, tip_descs); }
+  if (N <= 2) { return midpoint_root_utree(tree, tip_descs, time_scale); }
 
   // Progress reporting: 3 passes (see Rooting_substage).  Emit at pass start (nodes=0),
   // every ~1% of nodes, and at pass end (nodes=total), throttled to ~100 updates/pass.
@@ -1288,7 +1297,7 @@ auto ols_regression_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_des
     sum_dt2 += dt * dt;
   }
   auto var_t = sum_dt2 / Nd;
-  if (var_t <= 0.0) { return midpoint_root_utree(tree, tip_descs); }
+  if (var_t <= 0.0) { return midpoint_root_utree(tree, tip_descs, time_scale); }
 
   // Subtree statistics for one arc `a`, with distances measured from target(a).
   // Sub(a) = the connected component containing target(a) after removing the edge.
@@ -1430,7 +1439,7 @@ auto ols_regression_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_des
   }
   emit_progress(Rooting_substage::root_candidate_eval, 3, num_edges, num_edges);
 
-  if (best_candidates.empty()) { return midpoint_root_utree(tree, tip_descs); }
+  if (best_candidates.empty()) { return midpoint_root_utree(tree, tip_descs, time_scale); }
 
   // Pick winner, breaking ties randomly
   auto idx = absl::Uniform<int>(bitgen, 0, static_cast<int>(best_candidates.size()));
@@ -1896,7 +1905,8 @@ auto build_initial_phylo_tree(
     const std::function<void(int,int,int)>& refined_tree_progress_hook,
     const std::function<void(int,int,int)>& spr_refine_progress_hook,
     const std::function<void(int,int,int,int,int)>& rooting_progress_hook,
-    const std::function<void(const Rooting_info&)>& rooting_hook) -> Phylo_tree {
+    const std::function<void(const Rooting_info&)>& rooting_hook,
+    const Init_time_scale& time_scale) -> Phylo_tree {
 
   auto utree = build_guide_tree(std::move(ref_sequence), tip_descs, bitgen,
                                 guide_tree_progress_hook);
@@ -1918,7 +1928,7 @@ auto build_initial_phylo_tree(
 
   spr_refine(utree, tip_descs, bitgen, spr_refine_progress_hook);
 
-  auto rooting_info = ols_regression_root_utree(utree, tip_descs, bitgen, rooting_progress_hook);
+  auto rooting_info = ols_regression_root_utree(utree, tip_descs, bitgen, rooting_progress_hook, time_scale);
   rooting_hook(rooting_info);
 
   return utree_to_phylo_tree(utree, rooting_info, tip_descs, bitgen);

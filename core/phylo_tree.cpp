@@ -5,6 +5,10 @@
 #include "spr_study.h"
 #include "dates.h"
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
 namespace delphy {
 
 auto operator<<(std::ostream& os, const Phylo_tree& tree) -> std::ostream& {
@@ -119,8 +123,11 @@ auto assert_phylo_tree_integrity(const Phylo_tree& tree, bool force) -> void {
     
     for (const auto& node : pre_order_traversal(tree)) {
       
-      CHECK_LE(tree.at(node).t_min - 1e-2, tree.at(node).t + 1e-2);  // +/- 1e-2 = allow for roundoff (float<->double)
-      CHECK_LE(tree.at(node).t - 1e-2, tree.at(node).t_max + 1e-2);
+      // t_min and t_max are floats, so a bound taken from a double time is off by up to half a float
+      // ulp, which exceeds 1e-2 days once |t| passes about 1e5 days (a few hundred years).
+      auto tol = std::max(1e-2, std::abs(tree.at(node).t) * std::numeric_limits<float>::epsilon());
+      CHECK_LE(tree.at(node).t_min - tol, tree.at(node).t + tol);
+      CHECK_LE(tree.at(node).t - tol, tree.at(node).t_max + tol);
       if (tree.at(node).is_inner_node()) {
         CHECK_EQ(tree.at(node).t_min, -std::numeric_limits<float>::max());
         CHECK_EQ(tree.at(node).t_max, +std::numeric_limits<float>::max());
@@ -141,6 +148,13 @@ auto assert_phylo_tree_matches_tip_descs(
     const std::vector<Tip_desc>& tip_descs,
     bool force) -> void {
   if (not estd::is_debug_enabled && not force) { return; }
+
+  // Sites where the tree's reference differs from the original one
+  CHECK_EQ(std::ssize(tree.ref_sequence), std::ssize(orig_ref_sequence));
+  auto ref_diff_sites = std::vector<Site_index>{};
+  for (auto site = Site_index{0}; site != std::ssize(orig_ref_sequence); ++site) {
+    if (tree.ref_sequence[site] != orig_ref_sequence[site]) { ref_diff_sites.push_back(site); }
+  }
 
   // DFS tracking running sequence state and accumulated missing site intervals
   auto cur_seq = Sequence_overlay{tree.ref_sequence};
@@ -176,9 +190,15 @@ auto assert_phylo_tree_matches_tip_descs(
           expected[sd.site] = sd.to;
         }
 
-        // Check non-missing sites match
-        auto L = std::ssize(orig_ref_sequence);
-        for (auto site = Site_index{0}; site < L; ++site) {
+        // Check non-missing sites match.  Outside `ref_diff_sites` and the deltas of the two overlays, both sides
+        // read their base sequences, which agree there, so only those sites can differ.  They are visited in
+        // increasing order, so the first mismatch reported is the one a scan of every site would report.
+        auto sites = ref_diff_sites;
+        for (const auto& [site, state] : cur_seq.deltas()) { sites.push_back(site); }
+        for (const auto& [site, state] : expected.deltas()) { sites.push_back(site); }
+        std::ranges::sort(sites);
+        sites.erase(std::unique(sites.begin(), sites.end()), sites.end());
+        for (auto site : sites) {
           if (not cur_missing_sites.contains(site)) {
             CHECK_EQ(cur_seq[site], expected[site])
                 << "Tip " << node << " (" << tree.at(node).name << "), site " << site;

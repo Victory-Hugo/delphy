@@ -1,5 +1,7 @@
 #include "subrun.h"
 
+#include <algorithm>
+
 #include "distributions.h"
 #include "phylo_tree_calc.h"
 #include "spr_move.h"
@@ -8,6 +10,11 @@
 namespace delphy {
 
 Subrun::Subrun(absl::BitGenRef bitgen, Phylo_tree tree, bool includes_run_root, Global_evo_model evo)
+    : Subrun{bitgen, std::move(tree), includes_run_root, std::make_shared<const Global_evo_model>(std::move(evo))} {
+}
+
+Subrun::Subrun(absl::BitGenRef bitgen, Phylo_tree tree, bool includes_run_root,
+               std::shared_ptr<const Global_evo_model> evo)
     : bitgen_{bitgen},
       tree_{std::move(tree)},
       includes_run_root_{includes_run_root},
@@ -16,13 +23,17 @@ Subrun::Subrun(absl::BitGenRef bitgen, Phylo_tree tree, bool includes_run_root, 
 
 auto Subrun::recalc_derived_quantities() const -> void {
   // Derived quantities
-  state_frequencies_of_ref_sequence_per_partition_ =
-      calc_cur_state_frequencies_of_ref_sequence_per_partition();
-  ref_cum_Q_l_ = calc_cur_ref_cum_Q_l();
-  lambda_i_ = calc_cur_lambda_i(ref_cum_Q_l_);
+  state_frequencies_of_ref_sequence_per_partition_ = given_state_frequencies_.has_value()
+      ? *given_state_frequencies_
+      : calc_cur_state_frequencies_of_ref_sequence_per_partition();
+  ref_cum_Q_l_ = given_ref_cum_Q_l_ != nullptr
+      ? given_ref_cum_Q_l_
+      : std::make_shared<const std::vector<double>>(calc_cur_ref_cum_Q_l());
+  lambda_i_ = calc_cur_lambda_i(*ref_cum_Q_l_);
   log_G_ = calc_cur_log_G(lambda_i_, state_frequencies_of_ref_sequence_per_partition_);
   num_sites_missing_at_every_node_ = calc_cur_num_sites_missing_at_every_node();
   log_augmented_coalescent_prior_ = calc_cur_log_augmented_coalescent_prior();
+  log_calibration_prior_ = calc_cur_log_calibration_prior();
 }
 
 auto Subrun::check_derived_quantities() const -> void {
@@ -31,17 +42,36 @@ auto Subrun::check_derived_quantities() const -> void {
     { auto expected = calc_cur_log_augmented_coalescent_prior();
       CHECK(std::abs(log_augmented_coalescent_prior_ - expected) < 1e-5)
       << log_augmented_coalescent_prior_ << " != " << expected; }
+    { auto expected = calc_cur_log_calibration_prior();
+      CHECK(std::abs(log_calibration_prior_ - expected) < 1e-8)
+      << log_calibration_prior_ << " != " << expected; }
+    if (calibration_targets_follow_topology()) {
+      auto nodes = std::vector<Node_index>{};
+      CHECK(find_calibration_targets(nodes)) << "A calibrated sample set is not monophyletic";
+      CHECK(save_calibration_nodes() == nodes) << "A calibration target no longer is the MRCA of its sample set";
+      CHECK(std::isfinite(log_calibration_prior_)) << "A calibration target is outside its hard support";
+    }
+    if (threshold_constraint_) {
+      auto tips = Node_vector<int>(std::ssize(tree_), 0);
+      for (auto node : post_order_traversal(tree_)) {
+        tips[node] = tree_.at(node).is_tip()
+            ? threshold_constraint_->tip_weights[node]
+            : tips[tree_.at(node).left_child()] + tips[tree_.at(node).right_child()];
+      }
+      CHECK(tips == clade_tips_) << "The clade sizes of the threshold partition are out of date";
+      CHECK(satisfies_threshold_partition_constraint()) << "A move changed the threshold partition";
+    }
     { auto expected = calc_cur_state_frequencies_of_ref_sequence_per_partition();
-      for (auto beta = Partition_index{0}; beta != evo_.num_partitions(); ++beta) {
+      for (auto beta = Partition_index{0}; beta != evo_->num_partitions(); ++beta) {
         CHECK_EQ(state_frequencies_of_ref_sequence_per_partition_[beta], expected[beta])
             << "Partition " << beta; } }
     { auto expected = calc_cur_ref_cum_Q_l();
       for (auto l = Site_index{0}; l <= tree_.num_sites(); ++l) {
-        CHECK_LT(std::abs(ref_cum_Q_l_[l] - expected[l]), 1e-8)
+        CHECK_LT(std::abs((*ref_cum_Q_l_)[l] - expected[l]), 1e-8)
             << "Site " << l << ", "
-            << ref_cum_Q_l_[l] << " != "
+            << (*ref_cum_Q_l_)[l] << " != "
             << expected[l]; } }
-    { auto expected = calc_cur_lambda_i(ref_cum_Q_l_);
+    { auto expected = calc_cur_lambda_i(*ref_cum_Q_l_);
       for (const auto& node : index_order_traversal(tree_)) {
         CHECK((std::abs(lambda_i_[node] - expected[node])
                / static_cast<double>(tree_.num_sites())) < 1e-8)
@@ -61,22 +91,22 @@ auto Subrun::calc_cur_log_G(
     -> double {
   auto result = 0.0;
   if (includes_run_root_) {
-    result += calc_log_root_prior(tree_, evo_, state_frequencies_of_ref_sequence_per_partition);
+    result += calc_log_root_prior(tree_, *evo_, state_frequencies_of_ref_sequence_per_partition);
   }
-  result += calc_log_G_below_root(tree_, evo_, lambda_i, state_frequencies_of_ref_sequence_per_partition);
+  result += calc_log_G_below_root(tree_, *evo_, lambda_i, state_frequencies_of_ref_sequence_per_partition);
   return result;
 }
 
 auto Subrun::calc_cur_state_frequencies_of_ref_sequence_per_partition() const -> Partition_vector<Seq_vector<int>> {
-  return calc_state_frequencies_per_partition_of(tree_.ref_sequence, evo_);
+  return calc_state_frequencies_per_partition_of(tree_.ref_sequence, *evo_);
 }
 
 auto Subrun::calc_cur_lambda_i(const std::vector<double>& ref_cum_Q_l) const -> Node_vector<double> {
-  return calc_lambda_i(tree_, evo_, ref_cum_Q_l);
+  return calc_lambda_i(tree_, *evo_, ref_cum_Q_l);
 }
 
 auto Subrun::calc_cur_ref_cum_Q_l() const -> std::vector<double> {
-  return calc_cum_Q_l_for_sequence(tree_.ref_sequence, evo_);
+  return calc_cum_Q_l_for_sequence(tree_.ref_sequence, *evo_);
 }
 
 auto Subrun::calc_cur_num_sites_missing_at_every_node() const -> Node_vector<int> {
@@ -91,6 +121,101 @@ auto Subrun::calc_cur_log_augmented_coalescent_prior() const -> double {
   }
 }
 
+auto Subrun::calc_cur_log_calibration_prior() const -> double {
+  auto result = 0.0;
+  for (const auto& c : calibrations_) {
+    result += c.log_density_at(tree_.at(c.node).t);
+  }
+  return result;
+}
+
+auto Subrun::calc_log_calibration_prior_at(Node_index node, double t) const -> double {
+  auto result = 0.0;
+  for (const auto& c : calibrations_) {
+    if (c.node == node) { result += c.log_density_at(t); }
+  }
+  return result;
+}
+
+auto Subrun::calc_delta_log_calibration_prior(Node_index node, double t_old, double t_new) const -> double {
+  if (calibrations_.empty()) { return 0.0; }
+  auto log_p_new = calc_log_calibration_prior_at(node, t_new);
+  if (not std::isfinite(log_p_new)) { return -std::numeric_limits<double>::infinity(); }
+  auto log_p_old = calc_log_calibration_prior_at(node, t_old);
+  DCHECK(std::isfinite(log_p_old)) << "Current state is outside a calibration's hard support";
+  return log_p_new - log_p_old;
+}
+
+auto Subrun::calibration_t_bounds(Node_index node) const -> std::pair<double, double> {
+  auto t_lo = -std::numeric_limits<double>::infinity();
+  auto t_hi = +std::numeric_limits<double>::infinity();
+  for (const auto& c : calibrations_) {
+    if (c.node != node) { continue; }
+    // Older age == smaller time, so the oldest allowed age gives the lower bound on t.
+    t_lo = std::max(t_lo, c.reference_t - 365.0 * c.prior.support_oldest_age());
+    t_hi = std::min(t_hi, c.reference_t - 365.0 * c.prior.support_youngest_age());
+  }
+  return {t_lo, t_hi};
+}
+
+auto Subrun::find_calibration_targets(std::vector<Node_index>& nodes) const -> bool {
+  nodes.assign(std::ssize(calibrations_), k_no_node);
+  auto tips_below = Scratch_vector<int>(tree_.size(), 0);
+  auto marked_below = Scratch_vector<int>(tree_.size(), 0);
+  auto order = Scratch_vector<Node_index>{};
+  for (const auto& node : post_order_traversal(tree_)) {
+    order.push_back(node);
+    if (tree_.at(node).is_tip()) {
+      tips_below[node] = 1;
+    } else {
+      tips_below[node] = tips_below[tree_.at(node).left_child()] + tips_below[tree_.at(node).right_child()];
+    }
+  }
+
+  for (auto i = 0; i != std::ssize(calibrations_); ++i) {
+    const auto& c = calibrations_[i];
+    if (c.all_tips) { nodes[i] = tree_.root; continue; }
+    std::ranges::fill(marked_below, 0);
+    for (auto tip : c.tips) { marked_below[tip] = 1; }
+    auto size = static_cast<int>(std::ssize(c.tips));
+    // In post order, the first node with every marked tip below it is their MRCA
+    for (auto node : order) {
+      if (tree_.at(node).is_inner_node()) {
+        marked_below[node] = marked_below[tree_.at(node).left_child()] + marked_below[tree_.at(node).right_child()];
+      }
+      if (marked_below[node] == size) { nodes[i] = node; break; }
+    }
+    CHECK_NE(nodes[i], k_no_node);
+    if (c.require_monophyly && tips_below[nodes[i]] != size) { return false; }
+  }
+  return true;
+}
+
+auto Subrun::rebind_calibrations() -> bool {
+  auto nodes = std::vector<Node_index>{};
+  auto ok = find_calibration_targets(nodes);
+  if (ok) { restore_calibration_nodes(nodes); }
+  return ok;
+}
+
+auto Subrun::calc_rebound_log_calibration_prior() -> double {
+  if (not rebind_calibrations()) { return -std::numeric_limits<double>::infinity(); }
+  auto result = calc_cur_log_calibration_prior();
+  return std::isfinite(result) ? result : -std::numeric_limits<double>::infinity();
+}
+
+auto Subrun::save_calibration_nodes() const -> std::vector<Node_index> {
+  auto result = std::vector<Node_index>{};
+  result.reserve(std::ssize(calibrations_));
+  for (const auto& c : calibrations_) { result.push_back(c.node); }
+  return result;
+}
+
+auto Subrun::restore_calibration_nodes(const std::vector<Node_index>& nodes) -> void {
+  CHECK_EQ(std::ssize(nodes), std::ssize(calibrations_));
+  for (auto i = 0; i != std::ssize(nodes); ++i) { calibrations_[i].node = nodes[i]; }
+}
+
 auto Subrun::assert_cur_tip_sequences_compatible_with_original_ones() -> void {
   assert_tip_sequences_compatible_with_original_ones(tree_, original_sequences_, original_missing_sites_all_);
 }
@@ -102,22 +227,65 @@ auto Subrun::mcmc_sub_iteration() -> void {
   
   validate_derived_quantities();
 
+  auto run_move = [this](Move_kind kind, auto&& move) {
+    move_accepted_ = false;
+    move_blocked_ = false;
+    move_blocked_by_partition_ = false;
+    move();
+    auto& counts = move_counts_[static_cast<int>(kind)];
+    ++counts.proposed;
+    if (move_accepted_) { ++counts.accepted; }
+    if (move_blocked_) { ++counts.blocked_by_fixed_topology; }
+    if (move_blocked_by_partition_) { ++counts.blocked_by_partition; }
+  };
+
   if (only_displacing_inner_nodes_) {
-    inner_node_displace_move();
+    run_move(Move_kind::inner_node_displace, [this] { inner_node_displace_move(); });
   } else {
-    auto total_weight = 15.0 + 15.0;
-    if (topology_moves_enabled()) { total_weight += 1.0 + 1.0; }
+    // With topology moves disabled, the subtree slide stays in the mix: it keeps resampling node heights and the
+    // mutation history around the slid node, and discards proposals that would hop over another node.  Only the
+    // SPR move is dropped.
+    // The tip move gets weight 7.5 unless it was asked to be skipped and no tip can move
+    auto tip_weight = (skip_fixed_tip_moves_ && not has_movable_tip()) ? 0.0 : 7.5;
+    auto inner_end = 7.5;                   // inner_node_displace: weight 7.5
+    auto tip_end = inner_end + tip_weight;  // tip_displace: weight 7.5
+    auto reform_end = tip_end + 15.0;       // branch_reform: weight 15.0
+    auto slide_end = reform_end + 1.0;      // subtree_slide: weight 1.0
+    auto spr_end = slide_end + (topology_moves_enabled() ? 1.0 : 0.0);  // spr1: weight 1.0
+    // The single-site history Gibbs updates share one weight, half each.  At the default weight of
+    // zero the total below, and so the draw from the random stream, is what it has always been.
+    auto branch_gibbs_end = spr_end + 0.5 * history_gibbs_weight_;
+    auto node_gibbs_end = spr_end + history_gibbs_weight_;
+    auto total_weight = node_gibbs_end + marginal_node_time_weight_;
     auto r = absl::Uniform(bitgen_, 0.0, total_weight);
-    if (r < 7.5) { inner_node_displace_move(); }     // Weight 7.5
-    else if (r < 15.0) { tip_displace_move(); }      // Weight 7.5
-    else if (r < 30.0) { branch_reform_move(); }     // Weight 15.0
-    else if (topology_moves_enabled()) {
-      if (r < 31.0) { subtree_slide_move(); }        // Weight 1.0
-      else { spr1_move(); }                          // Weight 1.0
+    if (r < inner_end) { run_move(Move_kind::inner_node_displace, [this] { inner_node_displace_move(); }); }
+    else if (r < tip_end) { run_move(Move_kind::tip_displace, [this] { tip_displace_move(); }); }
+    else if (r < reform_end) { run_move(Move_kind::branch_reform, [this] { branch_reform_move(); }); }
+    else if (r < slide_end) { run_move(Move_kind::subtree_slide, [this] { subtree_slide_move(); }); }
+    else if (r < spr_end) { run_move(Move_kind::spr1, [this] { spr1_move(); }); }
+    else if (r < branch_gibbs_end) {
+      run_move(Move_kind::branch_history_gibbs, [this] { branch_history_gibbs_move(); });
+    } else if (r < node_gibbs_end) {
+      run_move(Move_kind::node_state_gibbs, [this] { node_state_gibbs_move(); });
+    } else {
+      run_move(Move_kind::node_time_marginal, [this] { node_time_marginal_move(); });
     }
   }
 
   check_derived_quantities();
+}
+
+auto Subrun::has_movable_tip() const -> bool {
+  if (has_movable_tip_ < 0) {
+    has_movable_tip_ = 0;
+    for (const auto& node : index_order_traversal(tree_)) {
+      if (tree_.at(node).is_tip() && tree_.at(node).t_min != tree_.at(node).t_max) {
+        has_movable_tip_ = 1;
+        break;
+      }
+    }
+  }
+  return has_movable_tip_ == 1;
 }
 
 auto Subrun::pick_random_node() -> Node_index {
@@ -168,6 +336,17 @@ auto Subrun::inner_node_displace_move() -> void {
     }
   }
 
+  // Restrict the proposal to the hard support of this node's age calibrations.  `t_min` and `t_max`
+  // depend only on quantities this move leaves alone, and the hard support is constant, so the
+  // proposal interval is the same for the forward and the reverse move and the Hastings term below
+  // stays exact.  See doc/extended/calibration.md, section 2.3.
+  if (not calibrations_.empty()) {
+    auto [cal_t_min, cal_t_max] = calibration_t_bounds(node);
+    t_min = std::max(t_min, cal_t_min);
+    t_max = std::min(t_max, cal_t_max);
+    if (not (t_min < t_max)) { return; }
+  }
+
   auto lambda_at_node = lambda_i_[node];
   auto d_logG_dt = 0.0;
   if (node != tree_.root) {
@@ -177,7 +356,7 @@ auto Subrun::inner_node_displace_move() -> void {
   for (const auto& child : tree_.at(node).children) {
     // child branches shorten (branch start of child is like branch end of node, adjusted for child missations)
     auto lambda_just_below_node = lambda_at_node + calc_delta_lambda_across_missations(
-        evo_, tree_.ref_sequence, ref_cum_Q_l_, tree_.at(child).missations);
+        *evo_, tree_.ref_sequence, *ref_cum_Q_l_, tree_.at(child).missations);
     d_logG_dt -= -lambda_just_below_node;
   }
 
@@ -195,7 +374,7 @@ auto Subrun::inner_node_displace_move() -> void {
     // See plans/2026-03-26-01-cap-root-displace-proposal.md for details.
     auto tree_span = t_max_tip_ - t_max;
     CHECK_GE(tree_span, 0.0);
-    auto delta_scale = std::min((1 / lambda_i_.at(node)) / 2,  // 95% of the time, won't hop past more than 1 mutation
+    auto delta_scale = std::min(root_displace_scale_factor_ * ((1 / lambda_i_.at(node)) / 2),  // 95% of the time, won't hop past more than 1 mutation (factor 1)
                                 tree_span);
     new_node_t = old_node_t + absl::Gaussian(bitgen_, 0.0, delta_scale);
     if (new_node_t < t_min || new_node_t > t_max) { return; }
@@ -219,15 +398,19 @@ auto Subrun::inner_node_displace_move() -> void {
   auto delta_log_G = d_logG_dt * (new_node_t - old_node_t);
   auto delta_log_prior =
       coalescent_prior_part_->calc_delta_partial_log_prior_after_displace_coalescence(old_node_t, new_node_t);
-  auto log_mh = delta_log_G + delta_log_prior - log_alpha_old_to_new_over_new_to_old;
+  auto delta_log_calibration_prior = calc_delta_log_calibration_prior(node, old_node_t, new_node_t);
+  auto log_mh = delta_log_G + delta_log_prior + delta_log_calibration_prior
+      - log_alpha_old_to_new_over_new_to_old;
   if (log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh)) {
     // Accept
+    move_accepted_ = true;
     coalescent_prior_part_->coalescence_displaced(old_node_t, new_node_t);
     tree_.at(node).t = new_node_t;
 
     auto dt = new_node_t - old_node_t;
     log_G_ += d_logG_dt * dt;
     log_augmented_coalescent_prior_ += delta_log_prior;
+    log_calibration_prior_ += delta_log_calibration_prior;
   }
 }
 
@@ -236,6 +419,10 @@ auto Subrun::tip_displace_move() -> void {
 
   auto node = pick_random_tip();
   CHECK_NE(node, tree_.root);
+  // No calibration term here: a calibration target is the common ancestor of at least two samples, so
+  // it is always an inner node of the whole tree.  A calibrated node that is a cut point appears in a
+  // neighbouring part as a frozen "tip" with t_min == t_max, which returns on the next line.
+  DCHECK(std::ranges::none_of(calibrations_, [node](const auto& c) { return c.node == node; }));
   if (tree_.at(node).t_min == tree_.at(node).t_max) { return; }  // No uncertainty!
 
   auto t_min = std::max(double{tree_.at(node).t_min}, tree_.at_parent_of(node).t);
@@ -275,6 +462,7 @@ auto Subrun::tip_displace_move() -> void {
   auto log_mh = delta_log_G + delta_log_prior - log_alpha_old_to_new_over_new_to_old;
   if (log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh)) {
     // Accept
+    move_accepted_ = true;
     coalescent_prior_part_->tip_displaced(old_node_t, new_node_t);
     tree_.at(node).t = new_node_t;
 
@@ -308,15 +496,210 @@ auto Subrun::branch_reform_move() -> void {
 
   // Accept/reject
   auto delta_log_G = 
-      calc_branch_log_G(t_P, t_X, lambda_i_.at(X), evo_, new_mutations)
-      - calc_branch_log_G(t_P, t_X, lambda_i_.at(X), evo_, old_mutations);
+      calc_branch_log_G(t_P, t_X, lambda_i_.at(X), *evo_, new_mutations)
+      - calc_branch_log_G(t_P, t_X, lambda_i_.at(X), *evo_, old_mutations);
   auto log_mh = delta_log_G;
   auto accept = log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh);
   
   if (accept) {
+    move_accepted_ = true;
     tree_.at(X).mutations.assign(new_mutations.begin(), new_mutations.end());
     log_G_ += delta_log_G;
   }
+}
+
+auto Subrun::history_sampler() -> Site_history_sampler& {
+  if (not history_sampler_.has_value()) { history_sampler_.emplace(*evo_); }
+  return *history_sampler_;
+}
+
+// C1.  Redraws the explicit history of a few sites on one branch from the exact conditional CTMC
+// bridge between the states the sites have at the two ends of the branch.  The branch and the sites
+// are drawn uniformly, independently of the current history, so this is a random-scan Gibbs step and
+// is always accepted; `delta_log_G` is bookkeeping, not an acceptance ratio.  Unlike the all-sites
+// proposal, nothing here degrades as the sequence gets longer or more divergent.
+auto Subrun::branch_history_gibbs_move() -> void {
+  if (std::ssize(tree_) < 2) { return; }
+  auto L = tree_.num_sites();
+  if (L == 0) { return; }
+
+  auto X = pick_random_node();
+  if (X == tree_.root) { return; }  // the branch above the root carries no history
+  auto P = tree_.at(X).parent;
+
+  auto& sampler = history_sampler();
+  // The sequence at the parent does not change during this move, so it is read out once and shared by
+  // every site the move visits; walking to the root once per site would cost the same for one site and
+  // k times as much for k of them.
+  auto parent_sequence = view_of_sequence_at(tree_, tree_.node_loc(P));
+  for (auto i = 0; i != history_gibbs_sites_per_move_; ++i) {
+    auto l = absl::Uniform<Site_index>(absl::IntervalClosedOpen, bitgen_, 0, L);
+    ++history_gibbs_stats_.branch_updates_proposed;
+    auto state_at_parent = Real_seq_letter{parent_sequence[l]};
+    auto result = gibbs_resample_branch_site_history(tree_, X, l, state_at_parent, sampler, bitgen_);
+    if (not result.performed) { continue; }  // the site is missing here: the identity is the Gibbs step
+    ++history_gibbs_stats_.branch_updates_performed;
+    history_gibbs_stats_.events_removed += result.num_old_events;
+    history_gibbs_stats_.events_created += result.num_new_events;
+    log_G_ += result.delta_log_G;
+    move_accepted_ = true;
+  }
+}
+
+// C2.  Redraws the state of a few sites at one inner node from the full conditional given the states
+// at the far ends of the incident branches, and then the conditional histories of those branches.
+// This is what lets an ancestral state change without resampling the whole genome.
+//
+// The root of the part is only eligible when it is the root of the whole tree: the cut point that
+// joins one part to another has to keep the sequence the other part was built from.
+auto Subrun::node_state_gibbs_move() -> void {
+  if (std::ssize(tree_) < 3) { return; }
+  auto L = tree_.num_sites();
+  if (L == 0) { return; }
+
+  auto V = pick_random_inner_node();
+  if (V == tree_.root && not includes_run_root_) { return; }
+
+  auto& sampler = history_sampler();
+  // As in the branch update: the sequence above `V` is fixed for the whole move.
+  auto parent_sequence = (V == tree_.root)
+      ? Sequence_overlay{tree_.ref_sequence}
+      : view_of_sequence_at(tree_, tree_.node_loc(tree_.at(V).parent));
+  for (auto i = 0; i != history_gibbs_sites_per_move_; ++i) {
+    auto l = absl::Uniform<Site_index>(absl::IntervalClosedOpen, bitgen_, 0, L);
+    ++history_gibbs_stats_.node_updates_proposed;
+    auto state_at_parent = Real_seq_letter{parent_sequence[l]};
+    auto result = gibbs_resample_node_site_state(tree_, V, l, state_at_parent, sampler, bitgen_);
+    if (not result.performed) { continue; }
+    ++history_gibbs_stats_.node_updates_performed;
+    if (result.state_changed) { ++history_gibbs_stats_.node_states_changed; }
+    history_gibbs_stats_.events_removed += result.num_old_events;
+    history_gibbs_stats_.events_created += result.num_new_events;
+    log_G_ += result.delta_log_G;
+    lambda_i_[V] += result.delta_lambda_at_node;
+    move_accepted_ = true;
+  }
+}
+
+
+// Phase F.  A node-time move with the histories of the incident branches integrated out.
+//
+// `Subrun::inner_node_displace_move` bounds the node time by the mutation times on the incident
+// branches, so a node can cross at most one mutation gap per step and the step shrinks as the
+// mutation density grows.  This move instead integrates those histories out, proposes the node time
+// against the local marginal likelihood alone, and then draws the histories back from their exact
+// conditional at the new time.  The proposal density of the new history cancels against the history's
+// own factor in the target, so the acceptance ratio is
+//
+//   (local marginal likelihood) x (coalescent prior) x (calibration prior) x (Hastings and Jacobian),
+//
+// with no reference to either history.  See doc/extended/history_gibbs.md, section 10.
+auto Subrun::node_time_marginal_move() -> void {
+  if (std::ssize(tree_) < 3) { return; }
+  auto L = tree_.num_sites();
+  if (L == 0) { return; }
+
+  auto V = pick_random_inner_node();
+  if (V == tree_.root && not includes_run_root_) { return; }
+
+  // The support is bounded by the surrounding node times and by any calibration, and by nothing else:
+  // the mutation times that bound the existing move are about to be discarded.
+  auto t_min = (V == tree_.root) ? -std::numeric_limits<double>::infinity()
+                                 : tree_.at_parent_of(V).t;
+  auto t_max = +std::numeric_limits<double>::infinity();
+  for (const auto& child : tree_.at(V).children) { t_max = std::min(t_max, tree_.at(child).t); }
+  if (not calibrations_.empty()) {
+    auto [cal_t_min, cal_t_max] = calibration_t_bounds(V);
+    t_min = std::max(t_min, cal_t_min);
+    t_max = std::min(t_max, cal_t_max);
+  }
+  if (not (t_min < t_max)) { return; }
+
+  auto old_t = tree_.at(V).t;
+  auto new_t = old_t;
+  auto log_hastings = 0.0;  // log q(new -> old) - log q(old -> new), Jacobian included
+  if (V == tree_.root) {
+    // The root's depth below its oldest child is multiplied by exp(u), u uniform on [-w, w].  The
+    // proposal is scale free, so it crosses the posterior of a deep root in a few steps whatever the
+    // mutation density; the Jacobian of the reparametrization is exp(u).
+    auto depth = t_max - old_t;
+    if (not (depth > 0.0)) { return; }
+    auto u = absl::Uniform(bitgen_, -marginal_node_time_window_, marginal_node_time_window_);
+    auto new_depth = depth * std::exp(u);
+    // Guard: evaluating the coalescent prior needs a grid covering the proposed range, and an absurd
+    // proposal would allocate an absurd grid.  `Run::set_marginal_node_time_window` keeps the window
+    // below `max_marginal_node_time_window()`, which makes this bound unreachable, so the guard never
+    // rejects and the kernel stays reversible; it is kept as a safety net.
+    if (not (new_depth > 0.0)
+        || new_depth > marginal_node_time_max_depth_factor * std::max(depth, 1.0)) { return; }
+    new_t = t_max - new_depth;
+    if (new_t <= t_min) { return; }
+    log_hastings = u;
+  } else {
+    if (not std::isfinite(t_min)) { return; }
+    new_t = absl::Uniform(absl::IntervalOpenOpen, bitgen_, t_min, t_max);
+    log_hastings = 0.0;  // uniform on an interval the move does not change
+  }
+  if (new_t <= t_min || new_t >= t_max) { return; }
+
+  auto& sampler = history_sampler();
+  // The sequences just outside the three branches do not depend on where `V` sits, so they are read
+  // out once and shared by both evaluations and by the redraw.
+  auto outside = read_incident_sequences(tree_, V);
+  auto log_F_old = calc_local_marginal_log_likelihood(tree_, V, old_t, outside, sampler);
+  auto log_F_new = calc_local_marginal_log_likelihood(tree_, V, new_t, outside, sampler);
+  if (not std::isfinite(log_F_old) || not std::isfinite(log_F_new)) { return; }
+
+  auto delta_log_prior =
+      coalescent_prior_part_->calc_delta_partial_log_prior_after_displace_coalescence(old_t, new_t);
+  auto delta_log_calibration_prior = calc_delta_log_calibration_prior(V, old_t, new_t);
+  auto log_mh = (log_F_new - log_F_old) + delta_log_prior + delta_log_calibration_prior + log_hastings;
+  if (not (log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh))) { return; }
+
+  // Accepted.  The three incident branches are the only part of the genealogy that changes, so their
+  // contribution to log G is recomputed explicitly before and after.
+  auto branch_log_G = [this](Node_index X) {
+    return calc_branch_log_G(tree_.at_parent_of(X).t, tree_.at(X).t, lambda_i_[X], *evo_,
+                             tree_.at(X).mutations);
+  };
+  auto before = 0.0;
+  if (V != tree_.root) { before += branch_log_G(V); }
+  for (const auto& child : tree_.at(V).children) { before += branch_log_G(child); }
+  if (V == tree_.root) {
+    before += calc_log_root_prior(tree_, *evo_, state_frequencies_of_ref_sequence_per_partition_);
+  }
+
+  coalescent_prior_part_->coalescence_displaced(old_t, new_t);
+  tree_.at(V).t = new_t;
+  auto refresh = gibbs_refresh_node_histories(tree_, V, outside, sampler, bitgen_);
+
+  // `lambda_i` at `V` follows the new sequence there; at the children it is unchanged in exact
+  // arithmetic, and is recomputed from `V` so that it stays exactly consistent.
+  auto lambda_above_V = (V == tree_.root) ? ref_cum_Q_l_->back() : lambda_i_[tree_.at(V).parent];
+  lambda_i_[V] = lambda_above_V + calc_delta_lambda_across_branch(
+      *evo_, tree_.ref_sequence, *ref_cum_Q_l_, tree_.at(V).mutations, tree_.at(V).missations);
+  for (const auto& child : tree_.at(V).children) {
+    lambda_i_[child] = lambda_i_[V] + calc_delta_lambda_across_branch(
+        *evo_, tree_.ref_sequence, *ref_cum_Q_l_, tree_.at(child).mutations,
+        tree_.at(child).missations);
+  }
+
+  auto after = 0.0;
+  if (V != tree_.root) { after += branch_log_G(V); }
+  for (const auto& child : tree_.at(V).children) { after += branch_log_G(child); }
+  if (V == tree_.root) {
+    after += calc_log_root_prior(tree_, *evo_, state_frequencies_of_ref_sequence_per_partition_);
+  }
+
+  log_G_ += after - before;
+  log_augmented_coalescent_prior_ += delta_log_prior;
+  log_calibration_prior_ += delta_log_calibration_prior;
+  history_gibbs_stats_.node_updates_proposed += L;
+  history_gibbs_stats_.node_updates_performed += L;
+  history_gibbs_stats_.node_states_changed += refresh.num_states_changed;
+  history_gibbs_stats_.events_removed += refresh.num_old_events;
+  history_gibbs_stats_.events_created += refresh.num_new_events;
+  move_accepted_ = true;
 }
 
 // Enumerate all branches that straddle time tree and are at or below the branch ending at P,
@@ -384,6 +767,7 @@ auto Subrun::subtree_slide_move() -> void {
 
     // 3.1 if the topology will change
     if (P != tree_.root && new_P_t < tree_.at_parent_of(P).t) {
+      if (not topology_moves_enabled()) { move_blocked_ = true; return; }
       // find new parent
       auto GG = tree_.at(P).parent;  // new grandparent after move
       auto SS = P;                  // new sibling after move
@@ -422,6 +806,7 @@ auto Subrun::subtree_slide_move() -> void {
 
     // 4.1 will the move change the topology
     if (new_P_t > tree_.at(S).t) {
+      if (not topology_moves_enabled()) { move_blocked_ = true; return; }
 
       auto branches = Scratch_vector<Node_index>{};
       enumerate_descendant_branches_straddling(tree_, P, new_P_t, X, std::back_inserter(branches));
@@ -492,6 +877,10 @@ auto Subrun::wilson_balding_move() -> void {
 auto Subrun::spr1_move() -> void {
   if (std::ssize(tree_) < 2) return;
 
+  // An SPR move can change which node is the MRCA of a calibrated sample set.  The targets are re-identified on
+  // the proposed tree and the calibration term enters the MH ratio below.
+  CHECK(calibrations_.empty() || calibration_targets_follow_topology());
+
   auto chooser = absl::Uniform(bitgen_, 0.0, 1.0);
   auto limit =
       chooser < 0.01 ? std::numeric_limits<int>::max() :
@@ -532,7 +921,7 @@ auto Subrun::spr1_move() -> void {
   // 0. Kick off SPR move by cataloguing and removing all of X's upstream mutations
   // FIXME: There *must* be a way to share the spr move core here
   auto spr = Spr_move{tree_, mu_JC, includes_run_root_,
-    evo_, lambda_i_, ref_cum_Q_l_, num_sites_missing_at_every_node_};
+    *evo_, lambda_i_, *ref_cum_Q_l_, num_sites_missing_at_every_node_};
 
   auto old_graft = spr.analyze_graft(X);
   spr.peel_graft(old_graft);
@@ -609,15 +998,27 @@ auto Subrun::spr1_move() -> void {
   
   
   // 5. Accept/reject?
+  // Calibrations: the targets of the proposed tree, and zero density if a calibrated set stopped being
+  // monophyletic or a target left its hard support.  Such a proposal is rejected, not redrawn.
+  auto old_calibration_nodes = save_calibration_nodes();
+  auto delta_log_calibration_prior = 0.0;
+  if (not calibrations_.empty()) {
+    delta_log_calibration_prior = calc_rebound_log_calibration_prior() - log_calibration_prior_;
+  }
   auto delta_log_augmented_coalescent_prior =
       coalescent_prior_part_->calc_delta_partial_log_prior_after_displace_coalescence(
           old_t_P, new_t_P);
   auto log_mh = (new_graft.delta_log_G - new_graft.log_alpha_mut)
       - (old_graft.delta_log_G - old_graft.log_alpha_mut)
       + log_alpha_new_to_old - log_alpha_old_to_new
-      + delta_log_augmented_coalescent_prior;
+      + delta_log_augmented_coalescent_prior
+      + delta_log_calibration_prior;
 
-  auto accept = log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh);
+  refresh_clade_tips_after_regraft(P, old_S);
+  auto partition_kept = threshold_partition_holds_after_regraft(P, old_S);
+  if (not partition_kept) { move_blocked_by_partition_ = true; }
+  auto accept = partition_kept && std::isfinite(delta_log_calibration_prior)
+      && (log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh));
 
   if (false && (pruning_changes_root || grafting_changes_root)) {
     std::cerr << absl::StreamFormat("old_t_P = %g, new_t_P = %g, accept = %s\n",
@@ -625,7 +1026,7 @@ auto Subrun::spr1_move() -> void {
   }
   
   if (false && (pruning_changes_root || grafting_changes_root) && not accept) { // && (new_num_muts < old_num_muts-5)) {
-    auto mu = evo_.mu_l(0);
+    auto mu = evo_->mu_l(0);
     auto L = tree_.num_sites();
 
     if (pruning_changes_root || grafting_changes_root) {
@@ -663,14 +1064,18 @@ auto Subrun::spr1_move() -> void {
   }
   
   if (accept) {
+    move_accepted_ = true;
     spr.apply_graft(new_graft);
     log_G_ -= old_graft.delta_log_G;
     log_G_ += new_graft.delta_log_G;
     log_augmented_coalescent_prior_ += delta_log_augmented_coalescent_prior;
+    log_calibration_prior_ += delta_log_calibration_prior;
     coalescent_prior_part_->coalescence_displaced(old_t_P, new_t_P);
   } else {
     spr.move(X, old_S, old_t_P);
     spr.apply_graft(old_graft);
+    restore_calibration_nodes(old_calibration_nodes);
+    refresh_clade_tips_after_regraft(P, new_S);
   }
 }
 
@@ -706,17 +1111,32 @@ auto Subrun::spr_move_core(
       (P != tree_.root && new_t_P == tree_.at_parent_of(P).t)) {  // FIXME: This should look at G', not G!
     return;
   }
+
+  // A proposal outside the hard support of an age calibration on P would be rejected below; return
+  // before doing the work.  This leaves the state untouched, exactly as a rejection does.  When the targets
+  // follow the topology, P may stop or start being a target, so the term is evaluated on the proposed tree.
+  auto targets_follow_topology = calibration_targets_follow_topology();
+  auto delta_log_calibration_prior = 0.0;
+  if (not targets_follow_topology) {
+    delta_log_calibration_prior = calc_delta_log_calibration_prior(P, old_t_P, new_t_P);
+    if (delta_log_calibration_prior == -std::numeric_limits<double>::infinity()) { return; }
+  }
   
   auto mu_JC = lambda_i_.at(tree_.root) / (tree_.num_sites() - num_sites_missing_at_every_node_.at(tree_.root));
   //std::cerr << absl::StreamFormat("mu_JC = %.3g x 10^3 / site / year\n",
   //                                mu_JC * 365.0 * 1e3);
   auto spr = Spr_move{tree_, mu_JC, includes_run_root_,
-    evo_, lambda_i_, ref_cum_Q_l_, num_sites_missing_at_every_node_};
+    *evo_, lambda_i_, *ref_cum_Q_l_, num_sites_missing_at_every_node_};
 
   auto old_graft = spr.analyze_graft(X);
   spr.peel_graft(old_graft);
   spr.move(X, new_nexus.branch, new_nexus.t);
   auto new_graft = spr.propose_new_graft(X, bitgen_);
+
+  auto old_calibration_nodes = save_calibration_nodes();
+  if (targets_follow_topology) {
+    delta_log_calibration_prior = calc_rebound_log_calibration_prior() - log_calibration_prior_;
+  }
   
   // Accept/reject?
   auto delta_log_augmented_coalescent_prior =
@@ -725,20 +1145,98 @@ auto Subrun::spr_move_core(
   auto log_mh = (new_graft.delta_log_G - new_graft.log_alpha_mut)
       - (old_graft.delta_log_G - old_graft.log_alpha_mut)
       + std::log(alpha_new_to_old_over_alpha_old_to_new)
-      + delta_log_augmented_coalescent_prior;
+      + delta_log_augmented_coalescent_prior
+      + delta_log_calibration_prior;
 
-  auto accept = log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh);
+  refresh_clade_tips_after_regraft(P, old_S);
+  auto partition_kept = threshold_partition_holds_after_regraft(P, old_S);
+  if (not partition_kept) { move_blocked_by_partition_ = true; }
+  auto accept = partition_kept && std::isfinite(delta_log_calibration_prior)
+      && (log_mh >= 0.0 || absl::Uniform(bitgen_, 0.0, 1.0) < std::exp(log_mh));
   
   if (accept) {
+    move_accepted_ = true;
     spr.apply_graft(new_graft);
     log_G_ -= old_graft.delta_log_G;
     log_G_ += new_graft.delta_log_G;
     log_augmented_coalescent_prior_ += delta_log_augmented_coalescent_prior;
+    log_calibration_prior_ += delta_log_calibration_prior;
     coalescent_prior_part_->coalescence_displaced(old_t_P, new_nexus.t);
   } else {
     spr.move(X, old_S, old_t_P);
     spr.apply_graft(old_graft);
+    restore_calibration_nodes(old_calibration_nodes);
+    refresh_clade_tips_after_regraft(P, new_nexus.branch);
   }
+}
+
+auto Subrun::set_threshold_partition_constraint(std::optional<Threshold_partition_constraint> constraint) -> void {
+  threshold_constraint_ = std::move(constraint);
+  clade_tips_.clear();
+  if (not threshold_constraint_) { return; }
+  const auto& c = *threshold_constraint_;
+  CHECK(includes_run_root_) << "Only the root part of a threshold partition is constrained";
+  CHECK_GE(c.min_cut_tips, 2);
+  CHECK_LE(c.min_cut_tips, c.max_cut_tips);
+  CHECK_EQ(std::ssize(c.tip_weights), std::ssize(tree_));
+  clade_tips_.assign(std::ssize(tree_), 0);
+  for (auto node : post_order_traversal(tree_)) {
+    if (tree_.at(node).is_tip()) {
+      CHECK_GE(c.tip_weights[node], 1);
+      clade_tips_[node] = c.tip_weights[node];
+    } else {
+      clade_tips_[node] = clade_tips_[tree_.at(node).left_child()] + clade_tips_[tree_.at(node).right_child()];
+    }
+  }
+  CHECK(satisfies_threshold_partition_constraint()) << "The tree does not have the threshold partition it was cut by";
+}
+
+auto Subrun::threshold_partition_holds_at(Node_index node) const -> bool {
+  if (node == tree_.root) { return true; }
+  const auto& c = *threshold_constraint_;
+  auto big_parent = clade_tips_[tree_.at(node).parent] > c.max_cut_tips;
+  if (tree_.at(node).is_tip() && c.tip_weights[node] > 1) { return big_parent; }  // a cut point
+  auto in_window = clade_tips_[node] >= c.min_cut_tips && clade_tips_[node] <= c.max_cut_tips;
+  return not (in_window && big_parent);
+}
+
+auto Subrun::satisfies_threshold_partition_constraint() const -> bool {
+  if (not threshold_constraint_) { return true; }
+  for (auto node : index_order_traversal(tree_)) {
+    if (not threshold_partition_holds_at(node)) { return false; }
+  }
+  return true;
+}
+
+// Only the nodes above P and above S have gained or lost tips.  The second walk recomputes, from where the two paths
+// meet, every node that the first one computed from a child the second had not reached yet.
+auto Subrun::refresh_clade_tips_after_regraft(Node_index P, Node_index S) -> void {
+  if (not threshold_constraint_) { return; }
+  auto refresh_above = [this](Node_index node) {
+    for (; node != k_no_node; node = tree_.at(node).parent) {
+      if (tree_.at(node).is_inner_node()) {
+        clade_tips_[node] = clade_tips_[tree_.at(node).left_child()] + clade_tips_[tree_.at(node).right_child()];
+      }
+    }
+  };
+  refresh_above(P);
+  refresh_above(tree_.at(S).parent);
+}
+
+// Whether a node is a cut point depends on its own size and on its parent's; both are unchanged except on the two paths
+// above P and S and at the children of their nodes.
+auto Subrun::threshold_partition_holds_after_regraft(Node_index P, Node_index S) const -> bool {
+  if (not threshold_constraint_) { return true; }
+  auto holds_above = [this](Node_index node) {
+    for (; node != k_no_node; node = tree_.at(node).parent) {
+      if (not threshold_partition_holds_at(node)) { return false; }
+      for (auto child : tree_.at(node).children) {
+        if (not threshold_partition_holds_at(child)) { return false; }
+      }
+    }
+    return true;
+  };
+  return holds_above(P) && holds_above(S);
 }
 
 }  // namespace delphy

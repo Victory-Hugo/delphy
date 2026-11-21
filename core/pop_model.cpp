@@ -245,6 +245,29 @@ auto Skygrid_pop_model::support_of_d_log_N_d_gamma(int k) const -> std::pair<dou
   }
 }
 
+auto Skygrid_pop_model::knots_entering_integral(int ka, int kb) const -> std::pair<int, int> {
+  auto M = this->M();
+
+  // The integral over [a, b] is a sum over the intervals ka..kb.  Interval k reads its population
+  // from gamma_k (interval 0 from gamma_0 and interval M+1 from gamma_M) in the staircase model,
+  // and from gamma_{k-1} and gamma_k in the log-linear model.  The integral does not depend on any
+  // other knot, and the bias applied to the sum must not either: biasing by a knot that does not
+  // enter it costs precision in proportion to how far that knot is from the ones that do, and with
+  // knots some hundreds of nats apart it pushes the biased sum into the subnormal range, where most
+  // of the mantissa is gone.  The result then acquires a spurious dependence on that knot, large
+  // enough to disagree with the analytic gradient of the same expression.
+  switch (type_) {
+    case Type::k_staircase:
+      return {std::min(ka, M), std::min(kb, M)};
+
+    case Type::k_log_linear:
+      return {std::max(ka - 1, 0), std::min(kb, M)};
+
+    default:
+      CHECK(false) << "unrecognized type " << static_cast<int>(type_);
+  }
+}
+
 auto Skygrid_pop_model::log_int_N_core(double a, double b, const std::vector<double>& gamma_eff) const -> double {
   CHECK_LE(a, b);
 
@@ -256,8 +279,7 @@ auto Skygrid_pop_model::log_int_N_core(double a, double b, const std::vector<dou
 
   // Bias ln(integral) by maximum gamma that enters the integral
   // (bias is compensated for at the end of the calculation)
-  auto kka = std::max(ka-1, 0);
-  auto kkb = std::min(kb,   M);
+  auto [kka, kkb] = knots_entering_integral(ka, kb);
   CHECK_LE(kka, kkb);
   auto bias = -std::numeric_limits<double>::infinity();
   for (auto k = kka; k <= kkb; ++k) {  // k == kkb is _included_
@@ -352,8 +374,7 @@ auto Skygrid_pop_model::d_log_int_N_d_gamma_core(
   // numerical errors; for the purposes of the d/d_gamma derivative,
   // `bias` is an arbitrary constant
   //
-  auto kka = std::max(ka-1, 0);
-  auto kkb = std::min(kb,   M);
+  auto [kka, kkb] = knots_entering_integral(ka, kb);
   CHECK_LE(kka, kkb);
   auto bias = -std::numeric_limits<double>::infinity();
   for (auto k = kka; k <= kkb; ++k) {  // k == kkb is _included_
@@ -533,6 +554,10 @@ auto Skygrid_pop_model::intensity_integral(double a, double b) const -> double {
 
 auto Skygrid_pop_model::d_log_int_N_d_gamma(double a, double b, int k) const -> double {
   return d_log_int_N_d_gamma_core(a, b, k, gamma_);
+}
+
+auto Skygrid_pop_model::d_log_intensity_integral_d_gamma(double a, double b, int k) const -> double {
+  return -d_log_int_N_d_gamma_core(a, b, k, minus_gamma_);
 }
 
 auto Skygrid_pop_model::print_to(std::ostream& os) const -> void {

@@ -170,6 +170,10 @@ if(NOT DEFINED EMSCRIPTEN)
   target_include_directories(delphy_mcc PUBLIC tools)
   target_link_libraries(delphy_mcc delphy_core)
 
+  add_executable(delphy_clades tools/delphy_clades.cpp)
+  target_include_directories(delphy_clades PUBLIC tools)
+  target_link_libraries(delphy_clades delphy_core)
+
   add_executable(beast_trees_to_dphy tools/beast_trees_to_dphy.cpp)
   target_include_directories(beast_trees_to_dphy PUBLIC tools)
   target_link_libraries(beast_trees_to_dphy delphy_core)

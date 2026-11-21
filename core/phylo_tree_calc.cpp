@@ -285,19 +285,34 @@ auto calc_Ttwiddle_a(const Phylo_tree& tree, std::span<const double> nu_l) -> Se
   return Ttwiddle_a;
 }
 
+auto calc_ref_ntwiddle_beta_a(
+    const Real_sequence& ref_sequence,
+    const Global_evo_model& evo)
+    -> Partition_vector<Seq_vector<double>> {
+  auto ntwiddle_beta_a = Partition_vector<Seq_vector<double>>(evo.num_partitions(), Seq_vector<double>{0.0});
+  for (auto l = Site_index{0}; l != std::ssize(ref_sequence); ++l) {
+    auto beta = evo.partition_for_site[l];
+    auto s_r = ref_sequence[l];
+    ntwiddle_beta_a[beta][s_r] += evo.nu_l[l];
+  }
+  return ntwiddle_beta_a;
+}
+
 auto calc_Ttwiddle_beta_a(
     const Phylo_tree& tree,
     const Global_evo_model& evo)
     -> Partition_vector<Seq_vector<double>> {
+  return calc_Ttwiddle_beta_a(tree, evo, calc_ref_ntwiddle_beta_a(tree.ref_sequence, evo));
+}
+
+auto calc_Ttwiddle_beta_a(
+    const Phylo_tree& tree,
+    const Global_evo_model& evo,
+    Partition_vector<Seq_vector<double>> ntwiddle_beta_a)
+    -> Partition_vector<Seq_vector<double>> {
   
   // TTwiddle^\beta_a = \sum_{l in beta} nu^(l) T^(l)_a
   auto Ttwiddle_beta_a = Partition_vector<Seq_vector<double>>(evo.num_partitions(), Seq_vector<double>{0.0});
-  auto ntwiddle_beta_a = Partition_vector<Seq_vector<double>>(evo.num_partitions(), Seq_vector<double>{0.0});
-  for (auto l = Site_index{0}; l != tree.num_sites(); ++l) {
-    auto beta = evo.partition_for_site[l];
-    auto s_r = tree.ref_sequence[l];
-    ntwiddle_beta_a[beta][s_r] += evo.nu_l[l];
-  }
 
   for (const auto& [node, children_so_far] : traversal(tree)) {
     if (children_so_far == 0) {
@@ -377,14 +392,20 @@ auto calc_dTtwiddle_a_dt_for_sequence(const Real_sequence& seq, std::span<const 
 }
 
 auto calc_cum_Q_l_for_sequence(const Real_sequence& seq, const Global_evo_model& evo) -> std::vector<double> {
-  auto cum_Q_l = std::vector<double>(seq.size()+1, 0.0);  // Note "+1".  See header comment for details
+  auto cum_Q_l = std::vector<double>{};
+  fill_cum_Q_l_for_sequence(seq, evo, cum_Q_l);
+  return cum_Q_l;
+}
+
+auto fill_cum_Q_l_for_sequence(const Real_sequence& seq, const Global_evo_model& evo, std::vector<double>& cum_Q_l)
+    -> void {
+  cum_Q_l.resize(seq.size()+1);  // Note "+1".  See header comment for details
   auto so_far = 0.0;
   cum_Q_l[0] = 0.0;
   for (auto l = Site_index{0}; l != std::ssize(seq); ++l) {
     so_far += evo.mu_l(l) * evo.nu_l[l] * evo.q_l_a(l, seq[l]);
     cum_Q_l[l+1] = so_far;
   }
-  return cum_Q_l;
 }
 
 auto calc_lambda_for_sequence(

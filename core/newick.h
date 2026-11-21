@@ -15,6 +15,7 @@ class Newick_node : public Nary_node {
   Newick_attributes node_attributes{};
   Newick_attributes branch_attributes{};
   double branch_length{0.0};
+  bool has_branch_length{false};
 };
 
 class Newick_tree : public Tree<Newick_node> {
@@ -63,11 +64,19 @@ class Newick_lexer {
 
   auto lex_next_token() -> Token_kind;
   auto lex_whitespace() -> bool;
-  auto lex_number() -> bool;
+  static auto is_number(std::string_view s) -> bool;
   auto lex_quoted_label() -> bool;
   auto lex_unquoted_label() -> bool;
   auto lex_comment_or_attributes() -> bool;
 };
+
+// Render `name` as a Newick label that parses back to exactly `name`: unchanged when it is a non-empty
+// unquoted label, otherwise single-quoted with embedded quotes doubled.
+auto newick_label(std::string_view name) -> std::string;
+
+// Inverse of newick_label(): parse one complete (quoted or unquoted) label.  Throws std::runtime_error
+// if `label` is not exactly one label.
+auto parse_newick_label(std::string_view label) -> std::string;
 
 class Newick_parser {
  public:

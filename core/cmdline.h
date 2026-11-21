@@ -34,7 +34,8 @@ auto build_rough_initial_tree_from_maple(
     const std::function<void(int,int,int)>& refined_tree_progress_hook = [](int,int,int){},
     const std::function<void(int,int,int)>& spr_refine_progress_hook = [](int,int,int){},
     const std::function<void(int,int,int,int,int)>& rooting_progress_hook = [](int,int,int,int,int){},
-    const std::function<void(const Rooting_info&)>& rooting_hook = [](const Rooting_info&){})
+    const std::function<void(const Rooting_info&)>& rooting_hook = [](const Rooting_info&){},
+    const Init_time_scale& time_scale = {})
     -> Phylo_tree;
 
 struct Processed_cmd_line {
@@ -45,6 +46,8 @@ struct Processed_cmd_line {
   int64_t log_every;
   std::optional<std::string> trees_filename;
   int64_t tree_every;
+  // Significant digits of the branch lengths in the .trees file.  6 is the historical value.
+  int trees_significant_digits;
   std::optional<std::string> delphy_output_filename;
   std::optional<std::string> delphy_output_metadata;
   int64_t delphy_snapshot_every;

@@ -1,5 +1,6 @@
 #include "very_scalable_coalescent.h"
 
+#include <algorithm>
 #include <iostream>
 
 #include "absl/strings/str_format.h"
@@ -421,10 +422,19 @@ auto Very_scalable_coalescent_prior_part::calc_delta_partial_log_prior_on_add_in
     // Handle ends specially
     auto i = cell_start;
 
+    // Cell bounds are recomputed from t_ref and the cell index, so an endpoint that sits exactly on
+    // a cell boundary can come out on the wrong side of it by a few units in the last place.  On a
+    // human time axis, where times reach 10^7 days, that is a few 10^-9 days, and it is more likely
+    // the finer the grid.  The widths are therefore clamped to the cell rather than asserted: the
+    // clamp moves the contribution by less than the roundoff that caused it, whereas a bare check
+    // aborts a run that is otherwise healthy.  A violation larger than one part in 10^9 of the cell
+    // width would not be roundoff, and is still caught.
     auto dt_cell_start = max_t - cell_lbound(cell_start, t_ref_, t_step_);
     auto dt_cell_end = cell_ubound(cell_end, t_ref_, t_step_) - min_t;
-    CHECK_GE(dt_cell_start, 0.0);
-    CHECK_GE(dt_cell_end, 0.0);
+    DCHECK_GE(dt_cell_start, -1e-9 * t_step_);
+    DCHECK_GE(dt_cell_end, -1e-9 * t_step_);
+    dt_cell_start = std::clamp(dt_cell_start, 0.0, t_step_);
+    dt_cell_end = std::clamp(dt_cell_end, 0.0, t_step_);
 
     auto old_k_bar_p_i = k_bar_p_[i];
     auto delta_k_bar_p_i = delta_k * dt_cell_start / t_step_;

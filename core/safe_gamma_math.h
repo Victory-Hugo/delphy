@@ -3,6 +3,7 @@
 #ifndef DELPHY_SAFE_GAMMA_MATH_H_
 #define DELPHY_SAFE_GAMMA_MATH_H_
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -79,11 +80,38 @@ inline auto safe_gamma_q_inv(double a, double Q) -> double {
 // Returns log(P(x_min < X < x_max)) where X ~ Gamma(shape=a, rate=1).
 // This is log(Q(a, x_min) - Q(a, x_max)).
 // Requires x_min < x_max (otherwise the result is -infinity or invalid).
+//
+// For x_max well below the bulk of the distribution, Q(a, x_min) and Q(a, x_max) are both
+// close to 1 and their difference cancels catastrophically (even to exactly 0).  In that regime
+// the difference is evaluated in log space from the lower-gamma series
+//   P(a, x) = x^a e^{-x} / Gamma(a+1) * sum_{k>=0} x^k / ((a+1)...(a+k)),
+// which converges for x < a + 1 and does not underflow for the integrals of interest.
+namespace internal {
+
+inline auto log_gamma_p_series(double a, double x) -> double {
+  auto term = 1.0;
+  auto sum = 1.0;
+  for (auto k = 1; k < 10000; ++k) {
+    term *= x / (a + k);
+    sum += term;
+    if (term < 1e-17 * sum) { break; }
+  }
+  return a * std::log(x) - x - std::lgamma(a + 1.0) + std::log(sum);
+}
+
+}  // namespace internal
+
 inline auto safe_log_gamma_integral(double a, double x_min, double x_max) -> double {
   CHECK_LT(x_min, x_max) << "safe_log_gamma_integral: x_min must be < x_max, got "
                           << x_min << " >= " << x_max;
   auto Q_hi = safe_gamma_q(a, x_min);
   auto Q_lo = safe_gamma_q(a, x_max);
+  if (Q_hi - Q_lo < 1e-3 * Q_hi && x_max < a + 1.0) {
+    auto log_p_hi = internal::log_gamma_p_series(a, x_max);
+    if (x_min <= 0.0) { return log_p_hi; }
+    auto log_p_lo = internal::log_gamma_p_series(a, x_min);
+    return log_p_hi + std::log1p(-std::exp(log_p_lo - log_p_hi));
+  }
   CHECK_GE(Q_hi, Q_lo) << "safe_log_gamma_integral: Q(a, x_min) >= Q(a, x_max) violated: "
                        << Q_hi << " < " << Q_lo;
   return std::log(Q_hi - Q_lo);
@@ -120,6 +148,23 @@ inline auto safe_sample_truncated_gamma(
   // Q is decreasing, so Q_hi = Q(y_lo) > Q_lo = Q(y_hi)
   auto Q_hi = safe_gamma_q(alpha, y_lo);
   auto Q_lo = safe_gamma_q(alpha, y_hi);
+
+  if (Q_hi - Q_lo < 1e-3 * Q_hi && y_hi < alpha + 1.0) {
+    // Both Q values are close to 1, so inverting Q would lose all precision.  Invert the lower
+    // incomplete gamma function in log space instead, by bisection.
+    auto log_p_hi = internal::log_gamma_p_series(alpha, y_hi);
+    auto log_p_lo = (y_lo > 0.0) ? internal::log_gamma_p_series(alpha, y_lo)
+                                 : -std::numeric_limits<double>::infinity();
+    auto u = absl::Uniform(absl::IntervalClosedClosed, bitgen, 0.0, 1.0);
+    auto log_target = log_p_hi + std::log((1.0 - u) * std::exp(log_p_lo - log_p_hi) + u);
+    auto a = y_lo;
+    auto b = y_hi;
+    for (auto i = 0; i < 200 && b - a > 1e-15 * b; ++i) {
+      auto mid = 0.5 * (a + b);
+      if (internal::log_gamma_p_series(alpha, mid) < log_target) { a = mid; } else { b = mid; }
+    }
+    return std::clamp(0.5 * (a + b) / beta, lo, hi);
+  }
 
   CHECK_LT(Q_lo, Q_hi) << "safe_sample_truncated_gamma: Q range is degenerate: "
                        << "Q_lo=" << Q_lo << " >= Q_hi=" << Q_hi;

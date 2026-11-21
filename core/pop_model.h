@@ -213,6 +213,11 @@ class Skygrid_pop_model : public Pop_model {
   auto d_log_N_d_gamma(double t, int k) const -> double;
   auto support_of_d_log_N_d_gamma(int k) const -> std::pair<double, double>;  // range of (inclusive) over which d_log_N_d_gamma(t,k) might be non-zero
   auto d_log_int_N_d_gamma(double a, double b, int k) const -> double;
+  // d/d gamma_k of log int_a^b dt' 1/N(t').  `intensity_integral` is `pop_integral` of the curve
+  // with every knot value negated, so this is the negative of `d_log_int_N_d_gamma`'s core
+  // evaluated at -gamma.  Summed over k it equals -1 for every interval, because shifting the whole
+  // curve by delta multiplies the intensity integral by exp(-delta).
+  auto d_log_intensity_integral_d_gamma(double a, double b, int k) const -> double;
 
   // Interval(t) in the top-level comment for Skygrid_pop_model
   auto interval_containing_t(double t) const -> int;
@@ -224,6 +229,10 @@ class Skygrid_pop_model : public Pop_model {
   Type type_;
   
   auto print_to(std::ostream& os) const -> void override;
+
+  // Range of knot indices whose value enters the integral over [a, b], where `ka` and `kb` are the
+  // intervals containing `a` and `b`.  Both bounds are inclusive.
+  auto knots_entering_integral(int ka, int kb) const -> std::pair<int, int>;
 
   // pop_integral and intensity_integral are identical except for a flip in the sign of gamma_k
   auto log_int_N_core(double a, double b, const std::vector<double>& gamma_eff) const -> double;

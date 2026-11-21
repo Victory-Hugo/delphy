@@ -2,12 +2,32 @@
 
 #include <absl/log/check.h>
 
+#include <cmath>
+#include <limits>
+
 #include "dates.h"
 #include "newick.h"
 #include "phylo_tree_calc.h"
 #include "io.h"
 
 namespace delphy {
+
+namespace {
+
+// Nearest float that is not above / not below `t`.  A plain cast rounds to nearest, which at deep
+// times can land several days away on the wrong side.
+auto float_at_or_below(double t) -> float {
+  auto f = static_cast<float>(t);
+  while (static_cast<double>(f) > t) { f = std::nextafter(f, -std::numeric_limits<float>::max()); }
+  return f;
+}
+auto float_at_or_above(double t) -> float {
+  auto f = static_cast<float>(t);
+  while (static_cast<double>(f) < t) { f = std::nextafter(f, +std::numeric_limits<float>::max()); }
+  return f;
+}
+
+}  // namespace
 
 auto newick_to_phylo_tree(const Newick_tree& ntree, const std::vector<std::string>& tip_names) -> Phylo_tree {
   // Newick tree had better be bifurcating!
@@ -50,9 +70,144 @@ auto newick_to_phylo_tree(const Newick_tree& ntree, const std::vector<std::strin
     } else {
       ptree.at(pnode).t = ptree.at_parent_of(pnode).t + ntree.at(nnode).branch_length * 365.0;  // years to days
     }
+
+    // A tree read back from a trees file has exactly known tip times: the file states them.  The
+    // bounds are floats, so they are widened to the neighbouring representable values to keep
+    // t_min <= t <= t_max exactly, which matters at deep times where the float spacing is days.
+    if (ptree.at(pnode).is_tip()) {
+      ptree.at(pnode).t_min = float_at_or_below(ptree.at(pnode).t);
+      ptree.at(pnode).t_max = float_at_or_above(ptree.at(pnode).t);
+    } else {
+      ptree.at(pnode).t_min = -std::numeric_limits<float>::max();
+      ptree.at(pnode).t_max = +std::numeric_limits<float>::max();
+    }
   }
   assert_phylo_tree_integrity(ptree);
   return ptree;
+}
+
+namespace {
+
+// Adapted slightly from https://stackoverflow.com/a/6500499
+auto trim_nexus_line(const std::string& str) -> std::string_view {
+  auto left_pos = str.find_first_not_of(" \t");
+  auto right_pos = str.find_last_not_of(" \t");
+  if (left_pos == std::string::npos || right_pos == std::string::npos) {
+    return std::string_view{""};
+  } else {
+    return std::string_view{str}.substr(left_pos, right_pos-left_pos+1);
+  }
+}
+
+// Returns the state number of a `tree STATE_n = ...` line.
+auto parse_beasty_tree_state(const std::string& line) -> std::int64_t {
+  CHECK(line.starts_with("tree STATE_")) << line.substr(0, 50);
+  auto state_num_first_pos = std::strlen("tree STATE_");
+  auto state_num_last_pos = line.find_first_not_of("0123456789", state_num_first_pos);
+  CHECK_NE(state_num_last_pos, std::string::npos);
+  auto state_sv = std::string_view{line}.substr(state_num_first_pos, state_num_last_pos-state_num_first_pos);
+  auto state = std::int64_t{};
+  CHECK(absl::SimpleAtoi(state_sv, &state)) << state_sv;
+  return state;
+}
+
+// Reads the taxa block and translate table of a BEAST-format trees file, leaving the stream
+// positioned at the first `tree ...` line.  Returns the tip names in translate-table order.
+auto read_beasty_trees_header(std::istream& is) -> std::vector<std::string> {
+  // This parser is *extremely* fragile and not very efficient, but good enough to parse
+  // the trees produced by Beasty_trees_output and at least one actual BEAST run
+  auto line = std::string{};
+  CHECK(std::getline(is, line) && trim_nexus_line(line) == "#NEXUS");
+  while (std::getline(is, line) && line[0] == '#') { continue; }
+  CHECK(trim_nexus_line(line) == "");
+  CHECK(std::getline(is, line) && trim_nexus_line(line) == "Begin taxa;");
+  CHECK(std::getline(is, line) && trim_nexus_line(line).starts_with("Dimensions ntax="));
+  auto ntax_sv = std::string_view{line.begin() + line.find('=')+1, line.begin() + line.find(';')};
+  auto ntax = int{};
+  CHECK(absl::SimpleAtoi(ntax_sv, &ntax));
+  CHECK(std::getline(is, line) && trim_nexus_line(line) == "Taxlabels");
+
+  auto tip_names = std::vector<std::string>{};
+  for (auto tip_index = 0; tip_index != ntax; ++tip_index) {
+    CHECK(std::getline(is, line));
+    auto label = trim_nexus_line(line);
+    // Labels are quoted when needed; files written before quoting was introduced hold them verbatim
+    auto name = std::string{label};
+    if (label.starts_with('\'')) {
+      try { name = parse_newick_label(label); } catch (const std::runtime_error&) {}
+    }
+    tip_names.push_back(std::move(name));
+  }
+
+  CHECK(std::getline(is, line) && trim_nexus_line(line) == ";");
+  CHECK(std::getline(is, line) && trim_nexus_line(line) == "End;");
+  while (std::getline(is, line) && trim_nexus_line(line) == "") {
+    ;
+  }
+  CHECK(trim_nexus_line(line) == "Begin trees;");
+  CHECK(std::getline(is, line) && trim_nexus_line(line) == "Translate");
+  // Skip names, we already have them
+  for (auto tip_index = 0; tip_index != ntax; ++tip_index) {
+    CHECK(std::getline(is, line));
+  }
+  CHECK(std::getline(is, line) && trim_nexus_line(line) == ";");
+  return tip_names;
+}
+
+}  // namespace
+
+Beasty_trees_stream::Beasty_trees_stream(std::istream& is) : is_{&is} {
+  tip_names_ = read_beasty_trees_header(is);
+}
+
+auto Beasty_trees_stream::next(std::int64_t& state, Phylo_tree& tree) -> bool {
+  if (done_) { return false; }
+  // newick_to_phylo_tree() expects 1-based tip indices
+  auto one_based_names = std::vector<std::string>{};
+  one_based_names.reserve(tip_names_.size() + 1);
+  one_based_names.push_back("Tip indices are 1-based, not 0-based!");
+  one_based_names.insert(one_based_names.end(), tip_names_.begin(), tip_names_.end());
+
+  auto line = std::string{};
+  while (std::getline(*is_, line)) {
+    if (line == "End;") { break; }
+    auto this_state = parse_beasty_tree_state(line);
+
+    if (this_state < min_state_) {
+      if (verbose_) {
+        std::cerr << absl::StreamFormat("Ignoring state %d < %d (burn-in)", this_state, min_state_) << std::endl;
+      }
+      continue;
+    }
+    if ((this_state % every_) != 0) {
+      if (verbose_) {
+        std::cerr << absl::StreamFormat("Ignoring state %d (not a multiple of %d)", this_state, every_)
+                  << std::endl;
+      }
+      continue;
+    }
+    if (verbose_) {
+      std::cerr << absl::StreamFormat("Reading state %d", this_state) << std::endl;
+    }
+    auto tree_ss = std::stringstream{line.substr(line.find(" = ") + 3)};
+    auto parser = Newick_parser{tree_ss};
+    tree = newick_to_phylo_tree(parser.parse_tree(), one_based_names);
+    state = this_state;
+    return true;
+  }
+  done_ = true;
+  return false;
+}
+
+auto scan_beasty_tree_states(std::istream& is) -> std::vector<std::int64_t> {
+  read_beasty_trees_header(is);
+  auto result = std::vector<std::int64_t>{};
+  auto line = std::string{};
+  while (std::getline(is, line)) {
+    if (line == "End;") { break; }
+    result.push_back(parse_beasty_tree_state(line));
+  }
+  return result;
 }
 
 auto read_beasty_trees(
@@ -60,76 +215,18 @@ auto read_beasty_trees(
     std::int64_t min_state,
     std::int64_t every)
     -> std::map<std::int64_t, Phylo_tree> {
-  
-  // This parser is *extremely* fragile and not very efficient, but good enough to parse
-  // the trees produced by Beasty_trees_output and at least one actual BEAST run
 
-  // Adapted slightly from https://stackoverflow.com/a/6500499
-  auto trim = [](const std::string& str) {
-    auto left_pos = str.find_first_not_of(" \t");
-    auto right_pos = str.find_last_not_of(" \t");
-    if (left_pos == std::string::npos || right_pos == std::string::npos) {
-      return std::string_view{""};
-    } else {
-      return std::string_view{str}.substr(left_pos, right_pos-left_pos+1);
-    }
-  };
-  
-  auto line = std::string{};
-  CHECK(std::getline(is, line) && trim(line) == "#NEXUS");
-  while (std::getline(is, line) && line[0] == '#') { continue; }
-  CHECK(trim(line) == "");
-  CHECK(std::getline(is, line) && trim(line) == "Begin taxa;");
-  CHECK(std::getline(is, line) && trim(line).starts_with("Dimensions ntax="));
-  auto ntax_sv = std::string_view{line.begin() + line.find('=')+1, line.begin() + line.find(';')};
-  auto ntax = int{};
-  CHECK(absl::SimpleAtoi(ntax_sv, &ntax));
-  CHECK(std::getline(is, line) && trim(line) == "Taxlabels");
-  
-  auto tip_names = std::vector<std::string>{};
-  tip_names.push_back("Tip indices are 1-based, not 0-based!");
-  for (auto tip_index = 0; tip_index != ntax; ++tip_index) {
-    CHECK(std::getline(is, line));
-    tip_names.push_back(std::string{trim(line)});
-  }
-  
-  CHECK(std::getline(is, line) && trim(line) == ";");
-  CHECK(std::getline(is, line) && trim(line) == "End;");
-  while (std::getline(is, line) && trim(line) == "") {
-    ;
-  }
-  CHECK(trim(line) == "Begin trees;");
-  CHECK(std::getline(is, line) && trim(line) == "Translate");
-  // Skip names, we already have them
-  for (auto tip_index = 0; tip_index != ntax; ++tip_index) {
-    CHECK(std::getline(is, line));
-  }
-  CHECK(std::getline(is, line) && trim(line) == ";");
+  auto stream = Beasty_trees_stream{is};
+  stream.set_min_state(min_state);
+  stream.set_every(every);
+  stream.set_verbose(true);
 
   auto result = std::map<std::int64_t, Phylo_tree>{};
-  while (std::getline(is, line)) {
-    if (line == "End;") { break; }
-    CHECK(line.starts_with("tree STATE_")) << line.substr(0, 50);
-    auto state_num_first_pos = std::strlen("tree STATE_");
-    auto state_num_last_pos = line.find_first_not_of("0123456789", state_num_first_pos);
-    CHECK_NE(state_num_last_pos, std::string::npos);
-    auto state_sv = std::string_view{line}.substr(state_num_first_pos, state_num_last_pos-state_num_first_pos);
-    auto state = std::int64_t{};
-    CHECK(absl::SimpleAtoi(state_sv, &state)) << state_sv;
-
-    if (state < min_state) {
-      std::cerr << absl::StreamFormat("Ignoring state %d < %d (burn-in)", state, min_state) << std::endl;
-    } else if ((state % every) != 0) {
-      std::cerr << absl::StreamFormat("Ignoring state %d (not a multiple of %d)", state, every) << std::endl;
-    } else {
-      std::cerr << absl::StreamFormat("Reading state %d", state) << std::endl;
-      
-      auto tree_ss = std::stringstream{line.substr(line.find(" = ") + 3)};
-      auto parser = Newick_parser{tree_ss};
-      result.insert({state, newick_to_phylo_tree(parser.parse_tree(), tip_names)});
-    }
+  auto state = std::int64_t{};
+  auto tree = Phylo_tree{};
+  while (stream.next(state, tree)) {
+    result.insert({state, std::move(tree)});
   }
-
   return result;
 }
 

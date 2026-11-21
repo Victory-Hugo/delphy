@@ -4,6 +4,7 @@
 #include <array>
 #include <functional>
 #include <ranges>
+#include <optional>
 #include <vector>
 
 #include "absl/log/check.h"
@@ -274,6 +275,16 @@ enum class Rooting_substage : int {
   root_candidate_eval = 3,    // Pass 3: per-edge root-position R^2 evaluation
 };
 
+// Time scale hint for the initial tree.  By default (no value) the pathogen constants are used when the
+// tip dates carry no regression signal: 1 mutation per 30 days along root-to-tip paths.
+struct Init_time_scale {
+  // Overall (all sites) mutations per day to assume instead of the pathogen constant.
+  std::optional<double> fallback_lambda;
+  // If true and no fallback_lambda is given, needing the fallback is an error instead of silently
+  // using the pathogen constant.
+  bool forbid_pathogen_fallback = false;
+};
+
 struct Rooting_info {
   Node_index root;
   Rooting_method method;
@@ -286,7 +297,8 @@ struct Rooting_info {
 // the mutation rate and root date via OLS regression of root-to-tip mutation
 // counts against tip dates.  Modifies the tree in place: inserts a root node.
 // The focus location is undefined after this call.
-auto midpoint_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs) -> Rooting_info;
+auto midpoint_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs,
+                         const Init_time_scale& time_scale = {}) -> Rooting_info;
 
 // Root the Utree at the position that maximizes R^2 of root-to-tip OLS regression against tip dates.
 // Falls back to midpoint rooting if regression is not applicable (e.g., all tips have the same date).
@@ -296,7 +308,8 @@ auto midpoint_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs) ->
 auto ols_regression_root_utree(Utree& tree, const std::vector<Tip_desc>& tip_descs,
                                absl::BitGenRef bitgen,
                                const std::function<void(int,int,int,int,int)>& progress_hook
-                                   = [](int,int,int,int,int){})
+                                   = [](int,int,int,int,int){},
+                               const Init_time_scale& time_scale = {})
     -> Rooting_info;
 
 // Root the Utree at the position that minimizes chi^2 of root-to-tip GLS regression against tip dates.
@@ -321,7 +334,8 @@ auto build_initial_phylo_tree(
     const std::function<void(int,int,int)>& refined_tree_progress_hook = [](int,int,int){},
     const std::function<void(int,int,int)>& spr_refine_progress_hook = [](int,int,int){},
     const std::function<void(int,int,int,int,int)>& rooting_progress_hook = [](int,int,int,int,int){},
-    const std::function<void(const Rooting_info&)>& rooting_hook = [](const Rooting_info&){})
+    const std::function<void(const Rooting_info&)>& rooting_hook = [](const Rooting_info&){},
+    const Init_time_scale& time_scale = {})
     -> Phylo_tree;
 
 enum class Arc_direction { entering, leaving };

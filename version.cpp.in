@@ -16,4 +16,7 @@ const std::string k_delphy_version_string{k_version + (k_is_release_build ? "" :
 const int k_delphy_build_number = k_is_release_build ? k_build_number : -(k_build_number + 1);
 const std::string k_delphy_commit_string{k_git_hash + (k_has_uncomitted_changes ? "+<uncommitted changes>" : "")};
 
+const std::string k_delphy_extended_version_string{"0.1.0-alpha.1"};
+const std::string k_delphy_extended_upstream_commit{"3069065f2984e37edbc5ca09b847b3ec074402ce"};
+
 }  // namespace delphy

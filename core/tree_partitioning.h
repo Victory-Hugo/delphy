@@ -28,6 +28,19 @@ auto generate_random_partition_stencil(
     absl::BitGenRef bitgen)
     -> std::vector<Partition_part_info>;
 
+// Number of tips below every node of `tree` (1 at a tip).
+auto calc_clade_tip_counts(const Tree_like auto& tree) -> Node_vector<int>;
+
+// The threshold partition with bounds `min_cut_tips` <= `max_cut_tips`: the cut points are the non-root nodes V with
+// min_cut_tips <= tips(V) <= max_cut_tips whose parent has more than `max_cut_tips` tips, in index order.  It is a
+// function of the topology and the two bounds only.  No cut point lies below another, so the part of a cut point holds
+// all of its descendants, and every topology change inside such a part leaves the partition unchanged.  A topology
+// change in the root part leaves it unchanged exactly when `Threshold_partition_constraint` (subrun.h) holds afterwards.  With
+// min_cut_tips > max_cut_tips there are no cut points.  See
+// doc/extended/threshold_partition.md.
+auto threshold_partition_stencil(const Tree_like auto& tree, int max_cut_tips, int min_cut_tips)
+    -> std::vector<Partition_part_info>;
+
 class Partition_part_node : public Binary_node {
  public:
   auto orig_tree_index() const -> Node_index { return orig_tree_index_; }
@@ -191,6 +204,32 @@ auto generate_random_partition_stencil(
   }
 
   return part_infos;
+}
+
+auto calc_clade_tip_counts(const Tree_like auto& tree) -> Node_vector<int> {
+  auto tips = Node_vector<int>(std::ssize(tree), 0);
+  for (auto node : post_order_traversal(tree)) {
+    if (tree.at(node).is_tip()) {
+      tips[node] = 1;
+    } else {
+      for (auto child : tree.at(node).children) { tips[node] += tips[child]; }
+    }
+  }
+  return tips;
+}
+
+auto threshold_partition_stencil(const Tree_like auto& tree, int max_cut_tips, int min_cut_tips)
+    -> std::vector<Partition_part_info> {
+  auto stencil = std::vector<Partition_part_info>{};
+  if (min_cut_tips > max_cut_tips) { return stencil; }
+  auto tips = calc_clade_tip_counts(tree);
+  for (auto node : index_order_traversal(tree)) {
+    if (node == tree.root) { continue; }
+    if (tips[node] >= min_cut_tips && tips[node] <= max_cut_tips && tips[tree.at(node).parent] > max_cut_tips) {
+      stencil.push_back({node});
+    }
+  }
+  return stencil;
 }
 
 auto partition_tree(const Tree_like auto& tree, const std::vector<Partition_part_info>& stencil) -> Partition {

@@ -70,7 +70,7 @@ auto Coalescent_prior::calc_log_prior() const -> double {
 
     if (k >= 2) {
       CHECK_NE(prev_t, -std::numeric_limits<double>::max());  // k == 1 in the first iteration
-      result -= (k * (k - 1)) / 2 * pop_model_->intensity_integral(prev_t, next_t);
+      result -= 0.5 * static_cast<double>(k) * (k - 1) * pop_model_->intensity_integral(prev_t, next_t);
     }
     prev_t = next_t;
 

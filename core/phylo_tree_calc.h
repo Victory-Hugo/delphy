@@ -91,11 +91,27 @@ auto calc_Ttwiddle_beta_a(
     const Phylo_tree& tree,
     const Global_evo_model& evo)
     -> Partition_vector<Seq_vector<double>>;
+// The same, with the nu-weighted count of the sites in each state of the reference sequence, per partition, supplied by the
+// caller.  That count is the only part of the calculation that visits every site, and it depends only on the reference
+// sequence, the site partitions and the site rates; `ref_ntwiddle_beta_a` must equal
+// `calc_ref_ntwiddle_beta_a(tree.ref_sequence, evo)`.
+auto calc_Ttwiddle_beta_a(
+    const Phylo_tree& tree,
+    const Global_evo_model& evo,
+    Partition_vector<Seq_vector<double>> ref_ntwiddle_beta_a)
+    -> Partition_vector<Seq_vector<double>>;
+auto calc_ref_ntwiddle_beta_a(
+    const Real_sequence& ref_sequence,
+    const Global_evo_model& evo)
+    -> Partition_vector<Seq_vector<double>>;
 
 auto calc_dTtwiddle_a_dt_for_sequence(const Real_sequence& seq, std::span<const double> nu_l) -> Seq_vector<double>;
 
 // cum_Q^(l)_k = sum_{l < k} Q^(l).  Note, 0 <= k <= L, so there are L+1 elements in the vector
 auto calc_cum_Q_l_for_sequence(const Real_sequence& seq, const Global_evo_model& evo) -> std::vector<double>;
+// Same values, written into `cum_Q_l` (resized to L+1) so that its storage can be reused
+auto fill_cum_Q_l_for_sequence(const Real_sequence& seq, const Global_evo_model& evo, std::vector<double>& cum_Q_l)
+    -> void;
 auto calc_lambda_for_sequence(const Real_sequence& seq, const Global_evo_model& evo) -> double;
 auto calc_lambda_at_node(const Phylo_tree& tree, Node_index node, const Global_evo_model& evo) -> double;
 auto calc_lambda_at_node(

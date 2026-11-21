@@ -93,7 +93,7 @@ union PopModel {
 // --------------
 
 table Params {
-  // Next free id: 48
+  // Next free id: 66
 
   step: int64   (id:  0);      // MCMC steps taken so far [unitless, >= 0]
   num_local_moves_per_global_move: int64 = -1 (id: 1);  // [unitless, >= 1].  -1 => use reasonable default
@@ -151,6 +151,54 @@ table Params {
   log_coalescent_prior: float64 (id: 19);  // log_prior = log_G + log_coalescent_prior + log_other_priors
   log_G: float64 (id: 20);
   total_branch_length: float64 (id: 21);  // This can be derived easily from the tree itself: should we remove it from here?
+
+  // Age calibrations on the MRCAs of named sample sets, as the canonical text of the calibration
+  // configuration (see core/calibration.h and doc/extended/calibration.md).
+  // Absent or empty means "no calibrations", which is what every file written before this field
+  // existed means, so old files keep their meaning.  On restore the taxon sets are re-resolved
+  // against the tree and a configuration that no longer validates is an error, never a silent drop.
+  calibration_config: string (id: 48);
+
+  // Opt-in sampler features, written only when one of them is on, so files of existing workflows are unchanged.
+  // exact_coalescent_correction targets the exact Kingman prior (see doc/extended/exact_coalescent.md); it
+  // needs the grid pinned by coal_prior_fixed_t_step (> 0, days).  global_scale_move_enabled switches on the joint time-scale move
+  // (doc/extended/global_scale_move.md): window is the half width of the uniform
+  // proposal of log s, moves_per_global_move the number of proposals per global step.  Absent means off.
+  exact_coalescent_correction: bool = false (id: 49);
+  coal_prior_fixed_t_step: float64 = 0.0 (id: 50);
+  global_scale_move_enabled: bool = false (id: 51);
+  global_scale_move_window: float64 = 0.0 (id: 52);
+  global_scale_moves_per_global_move: int32 = 0 (id: 53);
+
+  // Random number generator and partition state that make a resumed run continue exactly like the uninterrupted one (written with
+  // the fields above).  Text forms of the standard Mersenne Twister states of the run and of its parts, and the pool of partition
+  // stencils: the cut points of every stencil, stencils separated by -1; refresh_step is the step at which the pool is renewed
+  // (-1: the pool is not saved and is regenerated).
+  prng_state: string (id: 54);
+  sub_prng_states: [string] (id: 55);
+  partition_stencil_cut_points: [int32] (id: 56);
+  partition_stencil_refresh_step: int64 = -1 (id: 57);
+
+  // Site partitions (doc/extended/site_partitions.md): the canonical text of the configuration
+  // and the normalized relative rates, one per partition in configuration order.  An absent or empty
+  // configuration means one partition covering every site, which is what every file written before these
+  // fields existed means.  On restore the configuration is re-resolved against the tree, which recomputes
+  // the weights L_p (sites observed in at least one sample) from the tree itself; a configuration that no
+  // longer validates is an error, never a silent drop.
+  site_partition_config: string (id: 58);
+  site_partition_rates: [float64] (id: 59);
+  site_partition_rate_move_enabled: bool = true (id: 60);
+  site_partition_rate_prior_concentration: float64 = 1.0 (id: 61);
+
+  // The substitution model (doc/extended/substitution_models.md): the canonical six-digit
+  // exchangeability code, the frequency mode ("equal", "fixed" or "estimated") and the relative rate of
+  // every exchangeability class in class order, with the class of G-T at 1.  An absent or empty code
+  // means HKY85 with estimated frequencies, reconstructed from `hky_kappa` and `hky_pi_*`, which is what
+  // every file written before these fields existed holds.
+  subst_model_code: string (id: 62);
+  subst_frequency_mode: string (id: 63);
+  subst_class_rates: [float64] (id: 64);
+  subst_exchangeability_prior: [float64] (id: 65);  // log mean (transitions), log mean (other), sd
 
   // Mpox hack
   mpox_hack_enabled: bool = false (id: 22);  // If true, use Andrew Rambaut's approximate APOBEC-aware model (see run.h)

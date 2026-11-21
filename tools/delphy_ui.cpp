@@ -669,7 +669,7 @@ static auto print_stats_line() -> void {
   if (not ui_run->mpox_hack_enabled()) {
     std::cerr << absl::StreamFormat("mu = %.2g * 10^-3 subst / site / year, ", ui_run->mu() * 365 * 1000)
               << absl::StreamFormat("M_ts = %d, M_tv = %d, ", M_ts, ui_run->num_muts() - M_ts)
-              << absl::StreamFormat("kappa = %.3g, ", ui_run->hky_kappa())
+              << subst_model_summary(ui_run->subst_model())
               << absl::StreamFormat("pi = [%.2g, %.2g, %.2g, %.2g], ",
                                     ui_run->hky_pi()[A],
                                     ui_run->hky_pi()[C],

@@ -984,7 +984,7 @@ auto delphy_run_set_alpha(Delphy_context& /*ctx*/, Run& run, double alpha) -> vo
 EMSCRIPTEN_KEEPALIVE
 extern "C"
 auto delphy_run_get_hky_kappa(Delphy_context& /*ctx*/, const Run& run) -> double {
-  return run.hky_kappa();
+  return run.is_hky() ? run.hky_kappa() : 1.0;
 }
 
 EMSCRIPTEN_KEEPALIVE
