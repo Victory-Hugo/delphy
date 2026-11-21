@@ -112,6 +112,7 @@ jobs:
         run: |
           cmake --build --preset conan-release --target delphy --parallel
           cmake --build --preset conan-release --target delphy_mcc --parallel
+          cmake --build --preset conan-release --target delphy_clades --parallel
           cmake --build --preset conan-release --target tests --parallel
 
       - name: Verify binaries
@@ -122,6 +123,36 @@ jobs:
       - name: Run tests
         run: |
           ./build/release/tests/tests --gtest_output=xml:test-results.xml
+
+      # The shell suites under tests/cli drive the command line end to end: the options the
+      # human-sequence path adds, the external rooted tree, the age calibrations, the coalescent
+      # grid, the exact correction, the site partitions, the substitution models, the history
+      # updates and the clade summaries.  They catch what a unit test cannot -- an option accepted
+      # where it should be refused, or refused where it should be accepted -- and they are fast.
+      # Linux only, because they assume GNU coreutils behaviour.
+      - name: Run command-line suites (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -e
+          work=$(mktemp -d)
+          for s in run_external_tree_cli_tests run_calibration_cli_tests run_coalescent_cli_tests \
+                   run_exact_correction_cli_tests run_observation_cli_tests \
+                   run_site_partition_cli_tests run_subst_model_cli_tests \
+                   run_history_gibbs_cli_tests run_cli_scale_tests; do
+            bash "tests/cli/$s.sh" build/release/delphy "$work/$s" > "$work/$s.out" 2>&1 \
+              || true
+            pass=$(grep -c '^PASS' "$work/$s.out" || true)
+            fail=$(grep -c '^FAIL' "$work/$s.out" || true)
+            echo "$s: $pass passed, $fail failed"
+            if [ "$fail" != 0 ]; then sed -n '/^FAIL/p' "$work/$s.out"; exit 1; fi
+          done
+          bash tests/cli/run_clade_summary_cli_tests.sh build/release/delphy \
+              build/release/delphy_clades build/release/delphy_mcc "$work/clades" \
+              > "$work/clades.out" 2>&1 || true
+          pass=$(grep -c '^PASS' "$work/clades.out" || true)
+          fail=$(grep -c '^FAIL' "$work/clades.out" || true)
+          echo "run_clade_summary_cli_tests: $pass passed, $fail failed"
+          if [ "$fail" != 0 ]; then sed -n '/^FAIL/p' "$work/clades.out"; exit 1; fi
 
       - name: Upload test results
         uses: actions/upload-artifact@v7
