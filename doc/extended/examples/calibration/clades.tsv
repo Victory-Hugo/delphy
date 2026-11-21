@@ -1,0 +1,14 @@
+# Clade definition table for delphy_clades.
+#
+# clade_id   a stable name of your choosing; it keys every output table
+# taxa       sample IDs separated by commas or spaces, or the single word "all" for the root
+# note       ignored by delphy_clades; any other column is ignored too
+#
+# The first three clades are the ones calibration.cal calibrates; the last two are not calibrated and
+# their ages are inferred from the genealogy and the other calibrations.
+clade_id	taxa	note
+root	all	root of the sampled genealogy (calibrated)
+M	SAMPLE_A,SAMPLE_B,SAMPLE_C,SAMPLE_D,SAMPLE_E	calibrated
+N	SAMPLE_A,SAMPLE_B,SAMPLE_C	calibrated
+AB	SAMPLE_A,SAMPLE_B	not calibrated
+DE	SAMPLE_D,SAMPLE_E	not calibrated

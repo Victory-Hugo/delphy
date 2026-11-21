@@ -1,0 +1,3 @@
+# two short regions excluded from the analysis
+41-45
+100-104

@@ -1,0 +1,2 @@
+# sites examined in every sample
+1-280

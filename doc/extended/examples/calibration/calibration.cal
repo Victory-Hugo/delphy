@@ -1,0 +1,35 @@
+# Example age calibrations for the synthetic data in this directory.
+#
+# The three ages below are USER INPUT for this example.  Delphy has no built-in human mtDNA ages;
+# the names root / M / N are labels for sample sets, and nothing in Delphy knows what they mean.
+# "taxa all" is the MRCA of the SAMPLED lineages, which is the root of the supplied tree -- not by
+# itself the common ancestor of all human mtDNA.
+version 1
+
+calibration root
+  taxa all
+  age_units ka
+  age_reference_year 1950
+  distribution lognormal
+  median 140
+  sigma 0.15
+  oldest 400
+  youngest 60
+end
+
+calibration M
+  taxa SAMPLE_A SAMPLE_B SAMPLE_C SAMPLE_D SAMPLE_E
+  age_units ka
+  age_reference_year 1950
+  distribution normal
+  mean 100
+  stddev 12
+end
+
+calibration N
+  taxa SAMPLE_A SAMPLE_B SAMPLE_C
+  age_units cal_bp
+  distribution uniform
+  oldest 75000
+  youngest 45000
+end

@@ -1,0 +1,6 @@
+sample_id	date_convention	date_from	date_to	bp_reference_year
+SYN00000	cal_bp	3000	2920	
+SYN00001	iso	2019-03-27		
+SYN00002	cal_bp	3200	3120	
+SYN00003	iso	2011-04-06		
+SYN00004	cal_bp	3400	3320	

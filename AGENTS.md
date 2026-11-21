@@ -250,3 +250,118 @@ TEST(Tree_test, example) {
 ```
 
 Test files follow the pattern `{module}_tests.cpp` in the `tests/` directory.
+
+---
+
+## Project Extension: Human Uniparental Phylogenetics (mtDNA / chrY)
+
+These rules apply to work on the human uniparental extension (branches `human-uniparental/*`).
+They supplement, and never override, the upstream rules above.  If a rule here conflicts with an
+upstream rule, keep the upstream rule and report the conflict before continuing.
+
+### Goal and priorities
+
+Extend Delphy to perform statistically valid, scalable Bayesian phylogenetic inference on human
+mitochondrial DNA (mtDNA) and non-recombining Y-chromosome (chrY) sequences: calibrated lineage
+ages, tMRCA posteriors, clade support and population history.  Existing pathogen workflows must keep
+working unchanged.
+
+Priority order: statistical correctness > reproducibility > backward compatibility > performance >
+UI polish.
+
+### Before changing code
+
+1. Record the commit SHA, branch, uncommitted files, toolchain versions, and build/test status.
+   Work on a dedicated feature branch; never push to or merge into upstream `main` without explicit
+   approval.
+2. Trace the real call chain and the relevant tests before modifying any algorithm (see
+   `doc/human_uniparental/01_architecture_audit.md`).
+3. Check whether a requested feature already exists, exists internally without a CLI flag, or must be
+   written.  Reuse existing code; do not re-implement Skygrid, MCC or tMRCA machinery without a
+   demonstrated reason.
+4. Only implement the assigned task.  State assumptions, dependencies and acceptance criteria up front.
+
+### Scientific invariants
+
+- Preserve the EMAT invariants: timed mutations, branch consistency, deltas relative to the reference
+  sequence, missing-data semantics and tree integrity.
+- Distinguish mutation-history density (what drives performance) from overall divergence from the
+  reference; measure both on real datasets.
+- Internal times are days since 2020-01-01; internal rates are substitutions / site / day.  Convert
+  to and from years explicitly at external interfaces, and test conversions across long human time
+  spans and calendar boundaries.
+- Near-contemporaneous modern samples do not determine the absolute clock scale.  Before interpreting
+  absolute node ages there must be informative ancient sample dates, an explicit calibration prior,
+  or an identifiable external rate prior.  Never silently reuse viral clock defaults or invent dates.
+- For ancient samples, keep sampling age, archaeological date uncertainty and internal-node
+  calibrations distinct; they are not interchangeable.  Validate date conventions, reference epochs,
+  bounds and ordering.
+- Internal-node calibrations must enter the actual posterior density and every relevant
+  Metropolis-Hastings ratio (local partition moves, root moves, topology changes, relevant global
+  moves), including proposal asymmetry and Jacobians where applicable.  Rescaling tree times after a
+  run is not a Bayesian calibration.
+- Define calibration targets by stable taxon sets or clade semantics, never by node indices.  Specify
+  and test the behaviour of an MRCA prior when the taxa are not monophyletic.
+- Reconcile global and partition-local posterior computations before optimizing.  Check correctness
+  after partitioning, reassembly, serialization and resume.  Adding a single global `log_prior` term
+  does not prove correct sampling.
+- With a fixed topology, confirm that all topology-changing moves are disabled while valid node-time
+  and mutation-history moves still run.  With a free topology, all calibration mappings and
+  acceptance ratios must stay valid under topology proposals.
+- With the reference-plus-deltas representation, keep the full-sequence context needed for invariant
+  sites.  Never treat a SNP-only alignment as a full sequence without ascertainment handling.  Track
+  callable-site masks and missing data (especially for chrY); distinguish invariant sites from sites
+  that were never observed.
+- Do not assume mtDNA and chrY share evolutionary dynamics.  Exclude or explicitly model known
+  problematic regions, heteroplasmy, structural variants, recurrent mutations and uncertain calls, as
+  set by the task's data conventions.
+- Keep coalescent timescale parameters distinct from interpretable head counts.  Do not label a
+  timescale as an effective population size without explicit inheritance mode, ploidy, sex-specificity
+  and generation-time assumptions.
+- Treat numeric range limits, floating-point precision, coalescent grid resolution and initialization
+  heuristics as validation targets at human time scales.  Changing any hard-coded constant requires a
+  test and a justification.
+
+### Engineering rules
+
+1. Human-specific behaviour must be opt-in.  Default pathogen workflows and existing CLI behaviour
+   must not change unless the change is explicitly approved.
+2. Prefer small, reviewable changes with clear responsibilities.  Keep the CLI separate from the core
+   model; get the CLI workflow right before any web UI change.
+3. Comments and user-facing technical documentation are in English (plain ASCII, see Gotcha 12).  No
+   speculative or verbose comments, no comments describing how the code was produced, and no comments
+   about rejected alternatives.  Do not introduce new frameworks.
+4. Validate inputs instead of guessing.  Reject inconsistent taxon IDs, impossible calibration bounds,
+   incompatible date conventions, non-positive rates or scale parameters, and unsupported formats with
+   error messages that explain how to fix the input.
+5. Do not hard-code human mutation rates, haplogroup ages or archaeological dates.  All values must
+   come from explicit input, documented priors, or test-only generated data.
+6. Keep existing outputs compatible.  Any change to a serialization format or public API needs a
+   documented migration path and a test that old outputs still load.
+7. No force pushes, no amending published commits, no unrequested dependency upgrades.  Split
+   different tasks into separate, reviewable commits.
+
+### Required tests for every statistical feature
+
+- Unit tests for log densities, invalid inputs, edge cases, time conversions, calibration-target
+  membership and numerical stability.
+- Checks of full-posterior differences against local / incremental differences for proposed moves,
+  using an independent reference computation, covering accept, reject and rollback.
+- Where supported: fixed and free topology, single-threaded and multi-partition runs, and restart.
+- Synthetic datasets with known generating parameters, several seeds and several chains, with
+  suitable calibration scenarios; report coverage, bias, mixing / ESS and posterior uncertainty.
+  Never claim convergence from a single chain.
+- Regression tests showing that existing pathogen examples and default options behave as before.
+- Performance benchmarks only after statistical tests pass.  Record tips, sequence length, number of
+  mutations, threads, wall time, peak RSS and baseline commit.  Scale up step by step (small -> 1,000
+  -> 10,000 -> 50,000 tips) as resources allow; never report results for scales that were not run.
+
+### Task reports
+
+Every task report states: (1) findings, with exact source locations; (2) files changed and why, and
+any changed statistical assumption; (3) commands actually run, pass/fail counts, environment and
+reproducible example data, clearly separating tests not run from tests passed; (4) scientific
+assessment (posterior correctness, identifiability, numerical risks, open limitations); (5) measured
+performance only, with hardware and data context; (6) handover: commit SHA, artifacts, blockers and
+the entry conditions for the next task.  If correctness is unresolved, stop and document it; never
+hide failing tests, invent benchmarks, or claim unverified features are production-ready.
