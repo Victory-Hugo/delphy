@@ -263,4 +263,54 @@ TEST(SafeGammaMathTest, PromoteDoubleRegression) {
   EXPECT_NEAR(safe_gamma_q(271.4, 6601.0), 0.0, 1e-12);
 }
 
+
+// Reference values: log(gammainc(a, x_min, x_max) / gamma(a)) from mpmath at 60 digits.
+// The first case is the failing integral from a 100-sample, 16,569-site simulated mtDNA run
+// (seed 11) where Q(a, x_min) - Q(a, x_max) cancelled to exactly 0.
+TEST(SafeGammaMathTest, SafeLogGammaIntegralSmallArgumentsLargeShape) {
+  EXPECT_NEAR(safe_log_gamma_integral(16.2, 1.87278e-4, 0.0134838), -101.00798353201855, 1e-9);
+  EXPECT_NEAR(safe_log_gamma_integral(400.0, 50.0, 100.0), -258.14604590193459, 1e-9);
+  EXPECT_NEAR(safe_log_gamma_integral(300.0, 1e-3, 200.0), -24.330945673784342, 1e-9);
+  EXPECT_NEAR(safe_log_gamma_integral(1.0, 0.0, 0.001), -6.9082552373154707, 1e-9);
+}
+
+TEST(SafeGammaMathTest, SafeLogGammaIntegralModerateArgumentsUnchanged) {
+  EXPECT_NEAR(safe_log_gamma_integral(2.0, 1e-10, 0.5), -2.4056813913603713, 1e-9);
+  EXPECT_NEAR(safe_log_gamma_integral(30.0, 1e-3, 5.0), -31.200335082802821, 1e-9);
+  EXPECT_NEAR(safe_log_gamma_integral(30.0, 1e-3, 25.0), -1.7031777879358342, 1e-9);
+  EXPECT_DOUBLE_EQ(safe_log_gamma_integral(30.0, 1e-3, 25.0),
+                   std::log(safe_gamma_q(30.0, 1e-3) - safe_gamma_q(30.0, 25.0)));
+}
+
+
+// Mean of Gamma(a, 1) truncated to [x_min, x_max] by mpmath (60 digits).
+TEST(SafeGammaMathTest, SampleTruncatedGammaSmallArgumentsLargeShape) {
+  struct Case { double a, lo, hi, mean; };
+  const Case cases[] = {
+    {16.2, 1.87278e-4, 0.0134838, 0.0}, {400.0, 50.0, 100.0, 0.0}, {2.0, 1e-3, 0.5, 0.0}};
+  auto bitgen = std::mt19937_64{7};
+  for (auto c : cases) {
+    auto sum = 0.0;
+    constexpr auto n = 20000;
+    for (auto i = 0; i < n; ++i) {
+      auto x = safe_sample_truncated_gamma(c.a, 1.0, c.lo, c.hi, bitgen);
+      ASSERT_GE(x, c.lo);
+      ASSERT_LE(x, c.hi);
+      sum += x;
+    }
+    auto sample_mean = sum / n;
+    // For these ranges the density is proportional to x^(a-1) on [lo, hi] to excellent
+    // accuracy only when hi << a; compare with the exact mean by quadrature instead.
+    auto num = 0.0, den = 0.0;
+    constexpr auto m = 2000000;
+    for (auto i = 0; i < m; ++i) {
+      auto x = c.lo + (c.hi - c.lo) * (i + 0.5) / m;
+      auto w = std::exp((c.a - 1.0) * std::log(x) - x - (c.a - 1.0) * std::log(c.hi));
+      num += x * w;
+      den += w;
+    }
+    EXPECT_NEAR(sample_mean, num / den, 0.02 * (c.hi - c.lo)) << "a=" << c.a;
+  }
+}
+
 }  // namespace delphy

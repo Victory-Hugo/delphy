@@ -1076,6 +1076,70 @@ TEST(Utree_test, build_initial_phylo_tree_with_missing_data) {
   EXPECT_EQ(phylo_tree.at(0).name, "seq1");
 }
 
+// --- Init_time_scale (human-mode initialization) ---
+
+namespace {
+auto make_same_date_tips_and_ref(Real_sequence& ref) -> std::vector<Tip_desc> {
+  ref = Real_sequence{rA, rA, rA, rA, rA, rA, rA, rA};
+  return {
+      make_dated_tip("seq1", 100.0f, 100.0f, {{0, rA, rC}, {1, rA, rG}}),
+      make_dated_tip("seq2", 100.0f, 100.0f, {{0, rA, rC}, {2, rA, rT}}),
+      make_dated_tip("seq3", 100.0f, 100.0f, {{3, rA, rG}, {4, rA, rT}}),
+      make_dated_tip("seq4", 100.0f, 100.0f, {{5, rA, rC}, {6, rA, rG}, {7, rA, rT}})};
+}
+}  // namespace
+
+TEST(Utree_test, same_date_tips_use_supplied_time_scale_instead_of_pathogen_constant) {
+  auto ref = Real_sequence{};
+  auto tips = make_same_date_tips_and_ref(ref);
+  auto bitgen = std::mt19937{42};
+
+  auto pathogen = build_initial_phylo_tree(ref, tips, bitgen);
+  auto lambda_slow = 1.0 / 20000.0;  // one mutation per 20,000 days
+  auto bitgen2 = std::mt19937{42};
+  auto scaled = build_initial_phylo_tree(
+      ref, tips, bitgen2, [](int,int){}, [](int,int,int){}, [](int,int,int){},
+      [](int,int,int,int,int){}, [](const Rooting_info&){},
+      Init_time_scale{.fallback_lambda = lambda_slow, .forbid_pathogen_fallback = true});
+
+  auto depth = [](const Phylo_tree& tree) { return 100.0 - tree.at(tree.root).t; };
+  // Pathogen constant: tens to hundreds of days.  Supplied scale: hundreds of times deeper.
+  EXPECT_LT(depth(pathogen), 1000.0);
+  EXPECT_GT(depth(scaled), 100.0 * depth(pathogen));
+  // 5 to 6 mutations separate the two most distant tips, so the root is about 2.5 mutations deep.
+  EXPECT_NEAR(depth(scaled), 2.5 / lambda_slow, 0.5 / lambda_slow);
+}
+
+TEST(Utree_test, forbid_pathogen_fallback_without_rate_throws_when_fallback_is_needed) {
+  auto ref = Real_sequence{};
+  auto tips = make_same_date_tips_and_ref(ref);
+  auto bitgen = std::mt19937{42};
+  EXPECT_THROW(
+      build_initial_phylo_tree(
+          ref, tips, bitgen, [](int,int){}, [](int,int,int){}, [](int,int,int){},
+          [](int,int,int,int,int){}, [](const Rooting_info&){},
+          Init_time_scale{.fallback_lambda = std::nullopt, .forbid_pathogen_fallback = true}),
+      std::runtime_error);
+}
+
+TEST(Utree_test, forbid_pathogen_fallback_does_not_affect_trees_with_varying_dates) {
+  auto ref = Real_sequence{rA, rA, rA, rA, rA, rA, rA, rA};
+  auto tips = std::vector<Tip_desc>{
+      make_dated_tip("seq1", 10.0f, 10.0f, {{0, rA, rC}, {1, rA, rG}}),
+      make_dated_tip("seq2", 20.0f, 20.0f, {{0, rA, rC}, {2, rA, rT}}),
+      make_dated_tip("seq3", 30.0f, 30.0f, {{3, rA, rG}, {4, rA, rT}}),
+      make_dated_tip("seq4", 40.0f, 40.0f, {{5, rA, rC}, {6, rA, rG}, {7, rA, rT}})};
+  auto bitgen_a = std::mt19937{42};
+  auto bitgen_b = std::mt19937{42};
+  auto a = build_initial_phylo_tree(ref, tips, bitgen_a);
+  auto b = build_initial_phylo_tree(
+      ref, tips, bitgen_b, [](int,int){}, [](int,int,int){}, [](int,int,int){},
+      [](int,int,int,int,int){}, [](const Rooting_info&){},
+      Init_time_scale{.fallback_lambda = std::nullopt, .forbid_pathogen_fallback = true});
+  ASSERT_EQ(std::ssize(a), std::ssize(b));
+  for (auto i = 0; i < std::ssize(a); ++i) { EXPECT_DOUBLE_EQ(a.at(i).t, b.at(i).t); }
+}
+
 // --- detach_tip ---
 
 TEST(Utree_test, detach_tip_3tip_tree) {

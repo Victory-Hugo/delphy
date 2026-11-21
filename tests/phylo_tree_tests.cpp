@@ -767,4 +767,54 @@ TEST_F(Phylo_tree_complex_test, randomize_tree) {
   randomize_tree(tree, bitgen);
 }
 
+// The tip check compares only the sites that can differ (where the two references differ, and the deltas on
+// either side); a mismatch at any of these is still caught, and a missing site is still skipped.
+TEST(Phylo_tree_test, assert_phylo_tree_matches_tip_descs_checks_every_site_that_can_differ) {
+  auto orig_ref = Real_sequence{rA, rA, rA, rA};
+  auto make_tree = [] {
+    // Root 2 with tips 0 and 1; the tree is referenced to the root sequence, which has C at site 3
+    auto tree = Phylo_tree{3};
+    tree.ref_sequence = Real_sequence{rA, rA, rA, rC};
+    tree.root = 2;
+    tree.at(2).children = {0, 1};
+    tree.at(0).parent = 2;
+    tree.at(1).parent = 2;
+    tree.at(2).t = -10.0;
+    tree.at(0).t = tree.at(1).t = 0.0;
+    tree.at(1).mutations = {Mutation{rA, 1, rG, -5.0}};
+    return tree;
+  };
+  auto make_tips = [] {
+    auto tips = std::vector<Tip_desc>(2);
+    tips[0].seq_deltas = {Seq_delta{3, rA, rC}};
+    tips[1].seq_deltas = {Seq_delta{1, rA, rG}, Seq_delta{3, rA, rC}};
+    return tips;
+  };
+  assert_phylo_tree_matches_tip_descs(make_tree(), orig_ref, make_tips(), true);
+
+  {  // a mismatch only at a site where the two references differ
+    auto tips = make_tips();
+    tips[0].seq_deltas.clear();
+    EXPECT_DEATH(assert_phylo_tree_matches_tip_descs(make_tree(), orig_ref, tips, true), "site 3");
+  }
+  {  // a mismatch only at a site of the input's deltas
+    auto tips = make_tips();
+    tips[0].seq_deltas.insert(tips[0].seq_deltas.begin(), Seq_delta{0, rA, rT});
+    EXPECT_DEATH(assert_phylo_tree_matches_tip_descs(make_tree(), orig_ref, tips, true), "site 0");
+  }
+  {  // a mismatch only at a site of the tree's mutations
+    auto tree = make_tree();
+    tree.at(0).mutations = {Mutation{rA, 2, rG, -5.0}};
+    EXPECT_DEATH(assert_phylo_tree_matches_tip_descs(tree, orig_ref, make_tips(), true), "site 2");
+  }
+  {  // the same mismatch at a site that is missing in that tip is not a mismatch
+    auto tree = make_tree();
+    tree.at(0).mutations = {Mutation{rA, 2, rG, -5.0}};
+    tree.at(0).missations.intervals.insert({2, 3});
+    auto tips = make_tips();
+    tips[0].missations.intervals.insert({2, 3});
+    assert_phylo_tree_matches_tip_descs(tree, orig_ref, tips, true);
+  }
+}
+
 }  // namespace delphy
