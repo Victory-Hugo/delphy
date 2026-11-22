@@ -392,8 +392,9 @@ TEST(Exact_free_topology_test, the_coalescent_term_stays_exact_through_topology_
     auto exact = [](const delphy::Run& r) {
       return calc_exact_coalescent_log_prior(coalescent_event_times_of(r.tree()), r.pop_model());
     };
+    // At least 150 batches, and more (each one checked) until more than 5 topologies were visited
     auto topologies = std::map<std::string, int>{};
-    for (auto i = 0; i != 150; ++i) {
+    for (auto i = 0; i < 150 || (std::ssize(topologies) <= 5 && i < 1500); ++i) {
       run->do_mcmc_steps(c.batch);
       ++topologies[topology_signature(run->tree())];
       ASSERT_NEAR(run->log_coalescent_prior(), exact(*run), 1e-8) << "batch " << i;
@@ -868,11 +869,15 @@ TEST(Exact_free_topology_calibration_test, bookkeeping_through_rollbacks_and_a_c
     ASSERT_NEAR(r.log_calibration_prior(), expected, 1e-8) << "batch " << i;
     ASSERT_NEAR(r.log_coalescent_prior(), exact_coal(r), 1e-8) << "batch " << i;
   };
+  // At least 150 batches, and more (each one checked) until the chain has visited more than 5
+  // topologies: how soon that happens depends on the random stream, which differs between standard
+  // libraries.
   auto topologies = std::map<std::string, int>{};
-  for (auto i = 0; i != 150; ++i) {
+  auto num_batches = 0;
+  for (; num_batches < 150 || (std::ssize(topologies) <= 5 && num_batches < 1500); ++num_batches) {
     run->do_mcmc_steps(c.batch);
     ++topologies[topology_signature(run->tree())];
-    check(*run, i);
+    check(*run, num_batches);
   }
   EXPECT_GT(std::ssize(topologies), 5) << "the topology hardly moved";
   EXPECT_LT(run->exact_coalescent_batches_accepted(), run->exact_coalescent_batches_proposed())
@@ -897,7 +902,7 @@ TEST(Exact_free_topology_calibration_test, bookkeeping_through_rollbacks_and_a_c
               1e-6 * std::max(1.0, std::abs(run->log_coalescent_prior())));
   for (auto i = 0; i != 50; ++i) {
     restored->do_mcmc_steps(c.batch);
-    check(*restored, 150 + i);
+    check(*restored, num_batches + i);
   }
 }
 
