@@ -1,12 +1,15 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <random>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 #include "ctpl_stl.h"
@@ -408,86 +411,85 @@ TEST(Subst_model_mcmc_test, the_exchangeability_move_samples_the_exact_condition
 }
 
 TEST(Subst_model_mcmc_test, the_frequency_move_samples_the_exact_conditional) {
-  // The conditional of pi is three-dimensional; it is computed exactly on a grid over the simplex and
-  // compared with the chain's marginal for each base.
+  // The conditional of pi is three-dimensional; its mean and variance are computed by quadrature on a
+  // grid over the simplex and compared with the chain's mean for each base.  The conditional is far
+  // narrower than the simplex (sd ~ 0.002), so the grid is refined around it in stages until a cell is
+  // a fraction of a posterior sd wide; a single grid over the whole simplex would put the conditional
+  // in one or two cells and its midpoint quadrature would not be exact.
   auto pool = ctpl::thread_pool{1};
   auto tree = make_tree(8, 400, 324);
   auto run = make_run(pool, tree, 41, true);
   auto model = make_model("HKY85", {1.0, 2.5}, {0.31, 0.19, 0.17, 0.33});
   run->set_subst_model(model);
 
-  constexpr auto k_cells = 80;  // per coordinate
   auto log_target = [&](std::array<double, 4> pi) {
     auto proposed = run->subst_model();
     for (auto i = 0; i != 4; ++i) { proposed.pi_a[real_seq_letter_from_index(i)] = pi[i]; }
     return log_conditional_of_matrix(*run, proposed);
   };
-  // Marginal of each coordinate by summing the density over the simplex grid.
-  auto marginal = std::array<std::vector<double>, 4>{};
-  for (auto& m : marginal) { m.assign(k_cells, 0.0); }
-  auto max_log = -std::numeric_limits<double>::infinity();
-  auto cells = std::vector<std::pair<std::array<int, 3>, double>>{};
-  for (auto ia = 0; ia != k_cells; ++ia) {
-    for (auto ic = 0; ic != k_cells; ++ic) {
-      for (auto ig = 0; ig != k_cells; ++ig) {
-        auto pa = (ia + 0.5) / k_cells;
-        auto pc = (ic + 0.5) / k_cells;
-        auto pg = (ig + 0.5) / k_cells;
-        auto pt = 1.0 - pa - pc - pg;
-        if (pt <= 0.0) { continue; }
-        auto value = log_target({pa, pc, pg, pt});
-        max_log = std::max(max_log, value);
-        cells.push_back({{ia, ic, ig}, value});
+  struct Moments { std::array<double, 4> mean{}; std::array<double, 4> sd{}; };
+  // Midpoint quadrature of the mean and sd of (pi_A, pi_C, pi_G, pi_T) over the box lo..hi of the first three
+  // coordinates, restricted to the simplex.
+  auto moments_on_grid = [&](std::array<double, 3> lo, std::array<double, 3> hi, int n) {
+    auto cells = std::vector<std::pair<std::array<double, 4>, double>>{};
+    auto max_log = -std::numeric_limits<double>::infinity();
+    for (auto ia = 0; ia != n; ++ia) {
+      for (auto ic = 0; ic != n; ++ic) {
+        for (auto ig = 0; ig != n; ++ig) {
+          auto pa = lo[0] + (ia + 0.5) * (hi[0] - lo[0]) / n;
+          auto pc = lo[1] + (ic + 0.5) * (hi[1] - lo[1]) / n;
+          auto pg = lo[2] + (ig + 0.5) * (hi[2] - lo[2]) / n;
+          auto pt = 1.0 - pa - pc - pg;
+          if (pt <= 0.0) { continue; }
+          auto value = log_target({pa, pc, pg, pt});
+          max_log = std::max(max_log, value);
+          cells.push_back({{pa, pc, pg, pt}, value});
+        }
       }
     }
+    auto total = 0.0;
+    auto m1 = std::array<double, 4>{};
+    auto m2 = std::array<double, 4>{};
+    for (const auto& [pi, value] : cells) {
+      auto weight = std::exp(value - max_log);
+      total += weight;
+      for (auto a = 0; a != 4; ++a) { m1[a] += weight * pi[a]; m2[a] += weight * pi[a] * pi[a]; }
+    }
+    auto result = Moments{};
+    for (auto a = 0; a != 4; ++a) {
+      result.mean[a] = m1[a] / total;
+      result.sd[a] = std::sqrt(std::max(0.0, m2[a] / total - result.mean[a] * result.mean[a]));
+    }
+    return result;
+  };
+  auto exact = moments_on_grid({0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, 80);
+  for (auto [half_width_in_sd, min_half_width] : {std::pair{8.0, 1.0 / 80}, std::pair{8.0, 0.0}}) {
+    auto lo = std::array<double, 3>{};
+    auto hi = std::array<double, 3>{};
+    for (auto a = 0; a != 3; ++a) {
+      auto half_width = std::max(half_width_in_sd * exact.sd[a], min_half_width);
+      lo[a] = std::max(0.0, exact.mean[a] - half_width);
+      hi[a] = std::min(1.0, exact.mean[a] + half_width);
+    }
+    exact = moments_on_grid(lo, hi, 60);
   }
-  auto total = 0.0;
-  for (const auto& [index, value] : cells) {
-    auto weight = std::exp(value - max_log);
-    total += weight;
-    marginal[0][index[0]] += weight;
-    marginal[1][index[1]] += weight;
-    marginal[2][index[2]] += weight;
-    auto it = static_cast<int>((1.0 - (index[0] + 0.5) / k_cells - (index[1] + 0.5) / k_cells
-                                - (index[2] + 0.5) / k_cells) * k_cells);
-    if (it >= 0 && it < k_cells) { marginal[3][it] += weight; }
-  }
-  for (auto& m : marginal) { for (auto& v : m) { v /= total; } }
 
   constexpr auto k_keep = 20000;
   constexpr auto k_thin = 40;
-  auto counts = std::array<std::vector<int>, 4>{};
-  for (auto& c : counts) { c.assign(k_cells, 0); }
+  auto chain_sum = std::array<double, 4>{};
   for (auto i = 0; i != k_keep * k_thin; ++i) {
     run->subst_frequencies_move();
     if (i % k_thin == 0) {
-      for (auto a = 0; a != 4; ++a) {
-        auto cell = static_cast<int>(run->subst_model().pi_a[real_seq_letter_from_index(a)] * k_cells);
-        cell = std::clamp(cell, 0, k_cells - 1);
-        ++counts[a][cell];
-      }
+      for (auto a = 0; a != 4; ++a) { chain_sum[a] += run->subst_model().pi_a[real_seq_letter_from_index(a)]; }
     }
   }
-  // The exact marginal mean of each coordinate against the chain's mean, to within the Monte Carlo
+  // The exact conditional mean of each coordinate against the chain's mean, to within the Monte Carlo
   // error of the chain (the autocorrelation of a delta-exchange chain is high, so the tolerance is
   // generous but still far below the width of the posterior).
   for (auto a = 0; a != 4; ++a) {
-    auto exact_mean = 0.0;
-    auto exact_var = 0.0;
-    for (auto cell = 0; cell != k_cells; ++cell) {
-      exact_mean += marginal[a][cell] * (cell + 0.5) / k_cells;
-    }
-    for (auto cell = 0; cell != k_cells; ++cell) {
-      auto x = (cell + 0.5) / k_cells - exact_mean;
-      exact_var += marginal[a][cell] * x * x;
-    }
-    auto chain_mean = 0.0;
-    for (auto cell = 0; cell != k_cells; ++cell) {
-      chain_mean += counts[a][cell] * (cell + 0.5) / k_cells;
-    }
-    chain_mean /= k_keep;
-    EXPECT_NEAR(chain_mean, exact_mean, 0.25 * std::sqrt(exact_var))
-        << "base " << real_seq_letter_from_index(a) << " exact sd " << std::sqrt(exact_var);
+    auto chain_mean = chain_sum[a] / k_keep;
+    EXPECT_NEAR(chain_mean, exact.mean[a], 0.25 * exact.sd[a])
+        << "base " << real_seq_letter_from_index(a) << " exact sd " << exact.sd[a];
   }
 }
 
