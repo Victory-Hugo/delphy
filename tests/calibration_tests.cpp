@@ -256,8 +256,9 @@ auto some_clade(const Phylo_tree& tree, int min_tips) -> std::pair<Node_index, s
 // grid with a free population size, which otherwise dominates any comparison
 // of two chains on these small trees and has nothing to do with calibrations.
 auto make_run(ctpl::thread_pool& pool, const Phylo_tree& tree, uint32_t seed, int num_parts,
-              int local_moves_per_global_move, bool fixed_pop = false) -> std::shared_ptr<Run> {
-  auto run = std::make_shared<Run>(pool, std::mt19937{seed}, seed, tree);
+              int local_moves_per_global_move, bool fixed_pop = false,
+              double init_coal_prior_t_step = 1.0) -> std::shared_ptr<Run> {
+  auto run = std::make_shared<Run>(pool, std::mt19937{seed}, seed, tree, init_coal_prior_t_step);
   run->set_topology_moves_enabled(false);
   run->set_mu(k_mu_site_day);
   run->set_mu_prior_alpha(1.0);
@@ -1086,7 +1087,10 @@ TEST(Calibration_mcmc_test, works_at_deep_human_time_scales) {
   auto set = parse_config(absl::StrFormat(
       "version 1\ncalibration root\n  taxa all\n  age_units ka\n  age_reference_year 1950\n"
       "  distribution lognormal\n  median %.12g\n  sigma 0.15\nend\n", root_age_years / 1000.0));
-  auto run = make_run(pool, tree, 44, 1, -1);
+  // The initial coalescent grid spans the tree in 400 cells, as the command line does in human mode
+  // (--v0-coal-prior-init-cells); the 1-day pathogen default would first build a grid of millions of
+  // cells over 140,000 years.
+  auto run = make_run(pool, tree, 44, 1, -1, false, -tree.at_root().t / 400.0);
   run->set_mu(deep_mu);
   run->set_calibrations(set);
   auto result = run_and_check(*run, set, scaled_steps(200'000), 4);
