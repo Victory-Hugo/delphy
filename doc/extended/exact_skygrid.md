@@ -314,6 +314,10 @@ which is why the start effect and this bound are both named there and neither is
 whole story.  The principled alternative -- a high-population term in the prior, symmetric to the
 existing low-population barrier -- is a change to the model and is **not** made here.
 
+*Re-examined in Part 7:* replicate chains from an exact start show no measurable downward bias in the
+dispersion of the knot differences with an inferred smoothness (0.5% over 64 chains of 200,000 global
+moves), so this truncation is not what the deficits below measured.
+
 ## Part 2 - Frozen protocol
 
 Written before any campaign below was launched, and not changed afterwards.  Four kinds of check, in
@@ -517,6 +521,10 @@ change in the library whose absence from the command line is now a measured cost
 suspicion.  The flat-start arm is deliberately left ungated in the test: it is the configuration the
 campaigns found wanting, and asserting that it passes in the suite would be asserting away the
 campaigns' own result.
+
+*Superseded by Part 7:* the "deficit" in this table is a property of the statistic, not of the sampler.
+A batch-means z of a heavy-tailed time average is biased towards negative values even from a
+stationary start, and the test built on it has been replaced by a replicate design.
 
 Node-time marginals against quadrature of (1), 3 tips, constant population, no population moves:
 
@@ -1322,8 +1330,95 @@ a Skygrid curve and is unchanged.
 4. **A dispersed start for the Skygrid curve on the command line**, which is a two-line change in the
    library (3.3) and is the one concrete thing that would settle the two arms that miss their gate.
    It is a new option rather than a model change, and it is not added here because it was not in scope.
+   *Re-examined in Part 7:* the in-suite deficit this item rests on is explained by the statistic;
+   a dispersed start is not needed for correctness.
 5. **Carried forward unchanged from document 49**: the high-population guard is a proposal, not a
    change; and `Very_scalable_coalescent_prior_part` still has no floor for a vanishing cell population
    where `Scalable_coalescent_prior` has one, so the single-part and multi-part surrogates differ in
    that corner.  Under the correction a difference in the surrogate costs acceptance rate rather than
    correctness, which lowers the priority but does not close the item.
+
+## Part 7 - The dispersion deficit re-examined (2026-11-22)
+
+### 7.1 What was observed
+
+The in-suite test `a_dispersed_start_removes_the_dispersion_deficit` and the coarse-grid recovery test
+failed in the WASM build of the CI on `|z| < 4`, and a sweep over 12 seeds on two standard libraries
+gave second-moment z-scores of the knot differences that were negative in 19 of 24 runs of the
+dispersed-start arm.  Both tests ran one chain of 20,000 global moves per configuration and scored the
+time average of each statistic with a batch-means z (20 batches after a 5% burn-in).
+
+### 7.2 Three hypotheses and the experiment that separates them
+
+A, the target is wrong; B, a transition kernel does not leave the target invariant; C, both are right
+and the deficit comes from mixing, the start or the error estimate.  A and B are tested without any
+assumption about mixing by starting each chain from an **exact draw of its target**: tau from its
+Gamma(3, rate 3) prior (or 1), the knot differences given tau, I_bar from its Gamma prior, and the
+genealogy given the curve by exact inversion of the cumulative pair hazard.  With isochronous tips the
+ranked topology is independent of the curve, so the drawn topology can be held fixed.  If the kernel
+leaves the target invariant, every state of such a chain is an exact draw, and the time average of
+each statistic has exactly its prior expectation at any chain length; independent replicates then give
+a t-test whose validity does not depend on the mixing time.
+
+The driver is the disabled test `Exact_skygrid_validation.DISABLED_prior_recovery_driver`
+(`tests/exact_skygrid_mcmc_tests.cpp`); the runs, scripts and reports are in the campaign directory
+`87-Delphy-exact-skygrid-dispersion` (phase 1).  Arms: staircase and log-linear, fixed and inferred
+tau, three starts (exact, the old test's dispersed start, flat), 200 replicates of 20,000 global moves;
+plus 64 replicates of 200,000 global moves for the inferred-tau arms from the exact and the dispersed
+start.
+
+### 7.3 Results
+
+* **No bias.**  Over 16 arms and about 180 statistics the across-replicate z of the time averages is
+  inside `|z| < 2.2`.  In the four long arms with inferred tau the mean of `delta_k^2` is 1.4925 to
+  1.5052 against `E[1/tau] = 3/2` (`|z| <= 1.2`), split R-hat is at most 1.001 and the ESS per chain is
+  1,400 to 15,000.  The flat and the dispersed starts give the same answers; the largest start effect
+  at 20,000 moves is `z = -2.3` (staircase, inferred tau, flat start).
+* **The statistic is biased.**  On the same exact-start chains the batch-means z of `delta_k^2` has a
+  mean of -0.4 to -0.8, also at 200,000 moves, and 4.5% to 9.5% of single chains of 20,000 moves with
+  inferred tau cross `|z| >= 4` on some statistic (1% to 2% with tau fixed; 3% to 6% at 200,000
+  moves).  The reason is the distribution: with tau ~ Gamma(3, rate 3), `delta_k^2` has a finite
+  variance but an infinite fourth moment, so its time average is right-skewed and its batch variance
+  is small exactly when the average is low.  The five differences share tau, so their z-scores are
+  strongly correlated and the 19 negative runs of 24 are far fewer than 24 independent signs.
+* **Joint behaviour.**  The correlation of `log tau` and `log sum delta_k^2` is -0.66 per chain, as the
+  Gibbs coupling implies; there is no slowly mixing region.  The batch acceptance of the correction is
+  0.987 to 0.993.
+
+Verdict: C.  The target and the kernels are right; the deficit reported by the test was a property of
+its statistic.  The campaign deficits of 3.4a and 3.4b were scored with the same kind of statistic and
+are consistent with this explanation, but those chains were not re-scored.
+
+### 7.4 The replacement design
+
+The four recovery tests (`the_marginal_of_the_skygrid_parameters_is_their_prior_on_a_coarse_grid`,
+`the_marginal_is_still_the_prior_across_tree_partitions`,
+`the_marginal_is_the_prior_with_an_inferred_smoothness`, which replaces the dispersed-start test, and
+`the_marginal_is_the_prior_with_two_heterochronous_tips`) now run 160 independent replicates of 120
+global moves per configuration, each from an exact draw of the target, and score the **end states**,
+which are independent exact draws if the kernel is right.  Each end state is reduced to probability
+integral transforms that are exactly uniform under the target: `F(tau)`, `F(I_bar)` and
+`Phi(delta_k sqrt(tau))`.  For each the mean and the mean of `(u - 1/2)^2` are compared with 1/2 and
+1/12 using their exact variances 1/12 and 1/180.  The statistics are bounded, so the normal
+approximation is accurate in the tails.  The gate `|z| < 4.5` is a Bonferroni bound over the at most
+104 z-scores of the four tests: a correct sampler fails one of them with probability below 1e-3 per
+build.
+
+Measured on c2 (phase 2): over 200 independent seed bases per configuration (1,600 simulated runs of
+the configurations) the z-scores have mean -0.01 to +0.06, standard deviation 0.98 to 1.02 and
+`P(|z| > 3)` of 0.0017 to 0.0039 (0.0027 for a normal), and **no run fails**.  Power, measured by
+running the chains with a prior different from the one the end states are scored against (50 runs
+each): a Gamma(3, rate 2) tau prior instead of rate 3 fails every run, rate 2.5 one run in five; an
+N_bar prior scale 1.5 times too large fails every run, 1.2 times one run in three to five.  A wrong
+tau prior is seen through `F(tau)` only, because `delta_k sqrt(tau)` is N(0, 1) under any tau prior; a
+kernel error in the curve moves would move the `delta_k` statistics.  The four tests take about 25 s
+on one c2 core.
+
+### 7.5 What is not changed, and what remains open
+
+No model, prior, move or acceptance ratio was changed.  The other batch-means recovery tests
+(`skygrid_acceptance_tests.cpp`, `pop_moves_prior_recovery_tests.cpp`, the node-time quadrature test)
+use the same kind of statistic with tau fixed or with lighter tails and were not changed; their
+false-alarm rates were not measured.  The SBC and the campaign arms of Parts 3 and 4 keep their
+recorded status.
+

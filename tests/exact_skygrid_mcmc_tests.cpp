@@ -18,7 +18,10 @@
 
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <memory>
 #include <numbers>
@@ -27,6 +30,7 @@
 #include <vector>
 
 #include <absl/strings/str_format.h>
+#include <boost/math/special_functions/gamma.hpp>
 
 #include "ctpl_stl.h"
 
@@ -662,11 +666,6 @@ constexpr auto k_recovery_nbar_alpha = 4.0;
 constexpr auto k_recovery_nbar_beta = 1.2e6;   // days; E[I_bar] = alpha / beta
 constexpr auto k_recovery_knots = 6;           // M = 5
 
-auto digamma_of_4() -> double {
-  constexpr auto euler_gamma = 0.57721566490153286;
-  return 1.0 + 1.0 / 2 + 1.0 / 3 - euler_gamma;
-}
-
 // z-score of the mean of `x` against `expected`, with the standard error from batch means.
 auto batch_mean_z(const std::vector<double>& x, double expected, int num_batches = 20) -> double {
   auto size = static_cast<int>(x.size()) / num_batches;
@@ -685,127 +684,234 @@ auto batch_mean_z(const std::vector<double>& x, double expected, int num_batches
   return (grand - expected) / std::sqrt(var / num_batches);
 }
 
-struct Recovery_result {
-  double z_i_bar = 0.0;
-  double z_log_i_bar = 0.0;
-  std::vector<double> z_delta;
-  std::vector<double> z_delta_sq;
-  double batch_acceptance = 0.0;   // acceptance rate of the exact correction's whole-batch step
-  double worst_grid_excess = 0.0;  // |log P_cells - log P_exact| of the last state, in nats
+// A chain that starts from an exact draw of its target stays exactly at its target: after any number
+// of moves of a kernel that leaves the target invariant, the state is again an exact draw.  So
+// independent replicates, each started from an independent exact draw, end in independent exact draws,
+// and the end states can be compared with the known prior directly, whatever the mixing time.  A
+// wrong acceptance ratio, a missing Jacobian, a gradient that is not the gradient of the potential or
+// a batch correction that does not restore the exact target moves the end states away from it.
+//
+// Each end state is reduced to probability integral transforms that are exactly uniform under the
+// target: u = F(tau) for the Gamma prior of tau (when it is sampled), u = F(I_bar) for its Gamma
+// prior, and u = Phi(delta_k sqrt(tau)) for each knot difference, which is N(0, 1) and independent of
+// tau.  For each u the mean and the mean of (u - 1/2)^2 are compared with 1/2 and 1/12 using their
+// exact variances, 1/12 and 1/180; the second statistic is the one a dispersion deficit would move.
+// The statistics are bounded, so the normal approximation of their z-scores is accurate far into the
+// tails, unlike a batch-means z of a heavy-tailed time average (the previous design: for delta_k^2
+// with an inferred smoothness that z was biased by -0.4 to -0.8 even from a stationary start, and
+// about 5% of correct chains crossed |z| = 4; see doc/extended/exact_skygrid.md, section 7).
+//
+// The gate |z| < 4.5 is a Bonferroni bound over every z-score of the recovery tests in this file
+// (8 configurations, at most 14 each): the probability that a correct sampler fails one of them in a
+// given build is below 1e-3.
+
+constexpr auto k_tau_alpha = 3.0;        // inferred smoothness: tau ~ Gamma(3, rate 3), E[1/tau] = 3/2
+constexpr auto k_tau_beta = 3.0;
+constexpr auto k_recovery_t_step = 5000.0;   // 400 cells over the knot range: a coarse grid
+constexpr auto k_recovery_gate = 4.5;
+constexpr auto k_recovery_moves = 120;       // global moves per replicate (60 MCMC steps each)
+constexpr auto k_recovery_replicates = 160;
+constexpr auto k_heterochronous_tip_time = -2.0e5;
+
+struct Recovery_config {
+  Type type = Type::k_staircase;
+  bool free_tau = false;        // tau ~ Gamma(k_tau_alpha, rate k_tau_beta); otherwise tau = 1
+  bool heterochronous = false;  // two tips, the second at k_heterochronous_tip_time
+  int parts = 1;
+  // The priors the chain runs with.  They equal the ones the end states are scored against, except in
+  // the validation driver, which changes them to measure the power of the statistics.
+  double kernel_tau_beta = k_tau_beta;
+  double kernel_nbar_beta = k_recovery_nbar_beta;
 };
 
-// `heterochronous` spreads the tips over the most recent tenth of the knot range, with exact dates.
-// `tau_prior` non-empty switches the smoothness move on with that Gamma(alpha, rate beta) prior, in
-// which case `tau` is only the starting value and the second moment of each delta_k is E[1/tau].
-// `disperse` draws the initial curve from the prior instead of starting it flat, which is the one
-// thing Delphy's command line cannot do and the thing the campaigns' residual dispersion deficit is
-// attributed to; at the library level it costs two lines, so the attribution can be tested.
-auto run_exact_prior_recovery(
-    Type type, double tau, double t_step, uint32_t seed, int global_moves, int parts,
-    bool heterochronous, std::pair<double, double> tau_prior = {0.0, 0.0}, bool disperse = false)
-    -> Recovery_result {
-
-  auto pool = ctpl::thread_pool{static_cast<int>(parts)};
-  auto g = std::mt19937_64{seed};
-  // Two tips when the dates differ: with two tips there is exactly one labelled topology, so the
-  // coalescent density integrates to one whatever the sampling dates and whatever the curve, and the
-  // marginal of the Skygrid parameters is exactly their prior.  See the comment on the
-  // heterochronous test for why that argument fails for three or more serially sampled tips.
-  auto num_tips = heterochronous ? 2 : k_recovery_tips;
-  auto tree = make_kingman_tree(num_tips, g, 4.0e5);
-  if (heterochronous) {
-    // Halfway between the root and the other tip, so the date is exact and strictly above the root
-    auto t = 0.5 * tree.at_root().t;
-    tree.at(1).t = tree.at(1).t_min = tree.at(1).t_max = static_cast<float>(t);
-  }
-
+auto recovery_knots() -> std::vector<double> {
   auto x = std::vector<double>{};
-  auto gamma = std::vector<double>{};
-  for (auto k = 0; k != k_recovery_knots; ++k) {
-    x.push_back(-2.0e6 + 2.0e6 * k / (k_recovery_knots - 1));
-    gamma.push_back(std::log(4.0e5));
-  }
-  if (disperse) {
-    // One draw from the prior the marginals are compared with: I_bar ~ Gamma(alpha, rate beta) and
-    // delta_k ~ iid N(0, 1/tau), so the start is a typical curve rather than the flat one.
-    auto start = std::mt19937_64{seed ^ 0x5eedu};
-    auto i_bar = std::gamma_distribution<double>{
-        k_recovery_nbar_alpha, 1.0 / k_recovery_nbar_beta}(start);
-    auto normal = std::normal_distribution<double>{0.0, 1.0 / std::sqrt(tau)};
-    auto walk = std::vector<double>(k_recovery_knots, 0.0);
-    for (auto k = 1; k != k_recovery_knots; ++k) { walk[k] = walk[k-1] + normal(start); }
-    auto mean = 0.0;
-    for (auto v : walk) { mean += v; }
-    mean /= k_recovery_knots;
-    for (auto k = 0; k != k_recovery_knots; ++k) { gamma[k] = walk[k] - mean - std::log(i_bar); }
-  }
+  for (auto k = 0; k != k_recovery_knots; ++k) { x.push_back(-2.0e6 + 2.0e6 * k / (k_recovery_knots - 1)); }
+  return x;
+}
 
-  auto run = std::make_unique<delphy::Run>(pool, std::mt19937{seed}, seed, tree, t_step);
-  run->set_pop_model(std::make_shared<Skygrid_pop_model>(x, gamma, type));
+// The genealogy of tips at `tip_times` under `pop`, by inverting the cumulative pair hazard exactly
+// with `intensity_integral` between sampling times.
+auto kingman_tree_under(const Pop_model& pop, const std::vector<double>& tip_times, std::mt19937_64& g)
+    -> Phylo_tree {
+  auto num_tips = static_cast<int>(std::ssize(tip_times));
+  auto tree = Phylo_tree{2 * num_tips - 1};
+  tree.ref_sequence = Real_sequence(1, Real_seq_letter::A);
+  auto order = std::vector<int>{};
+  for (auto i = 0; i != num_tips; ++i) {
+    tree.at(i).t = tree.at(i).t_min = tree.at(i).t_max = static_cast<float>(tip_times[i]);
+    tree.at(i).name = "S" + std::to_string(i);
+    order.push_back(i);
+  }
+  std::ranges::sort(order, [&](int a, int b) { return tip_times[a] > tip_times[b]; });
+  auto active = std::vector<Node_index>{};
+  auto next_tip = 0;
+  auto t = tip_times[order[0]];
+  auto join_tips = [&] {
+    while (next_tip != num_tips && tip_times[order[next_tip]] >= t) { active.push_back(order[next_tip++]); }
+  };
+  join_tips();
+  auto next = num_tips;
+  while (next_tip != num_tips || std::ssize(active) > 1) {
+    auto k = static_cast<double>(std::ssize(active));
+    auto t_stop = next_tip != num_tips ? tip_times[order[next_tip]] : -std::numeric_limits<double>::infinity();
+    if (k < 2) { t = t_stop; join_tips(); continue; }
+    auto target = std::exponential_distribution<double>{1.0}(g) / (k * (k - 1) / 2.0);
+    if (std::isfinite(t_stop) && pop.intensity_integral(t_stop, t) <= target) { t = t_stop; join_tips(); continue; }
+    auto width = pop.pop_at_time(t) * target;
+    auto lo = t - width;
+    while (pop.intensity_integral(lo, t) < target) { width *= 2.0; lo = t - width; }
+    auto hi = t;
+    for (auto it = 0; it != 200 && hi - lo > 1e-9 * std::max(1.0, std::abs(lo)); ++it) {
+      auto mid = 0.5 * (lo + hi);
+      if (pop.intensity_integral(mid, t) < target) { hi = mid; } else { lo = mid; }
+    }
+    t = 0.5 * (lo + hi);
+    auto i = g() % active.size(); auto a = active[i]; active[i] = active.back(); active.pop_back();
+    auto j = g() % active.size(); auto b = active[j]; active[j] = active.back(); active.pop_back();
+    auto& node = tree.at(next);
+    node.t = t;
+    node.t_min = -std::numeric_limits<float>::max();
+    node.t_max = +std::numeric_limits<float>::max();
+    node.name = "n" + std::to_string(next);
+    node.children = {a, b};
+    tree.at(a).parent = next;
+    tree.at(b).parent = next;
+    active.push_back(next++);
+  }
+  tree.root = next - 1;
+  tree.at(tree.root).parent = k_no_node;
+  return tree;
+}
+
+struct Recovery_state {
+  double tau = 1.0;
+  std::vector<double> gamma;
+  Phylo_tree tree;
+};
+
+// An exact draw from the target: tau from its prior (or 1), the knot differences given tau, I_bar from
+// its prior, and the genealogy given the curve.  With isochronous tips (or two tips) the topology
+// carries no information about the curve, so the drawn topology may then be held fixed.
+auto draw_stationary_state(const Recovery_config& c, std::mt19937_64& g) -> Recovery_state {
+  auto state = Recovery_state{};
+  if (c.free_tau) { state.tau = std::gamma_distribution<double>{k_tau_alpha, 1.0 / k_tau_beta}(g); }
+  auto i_bar = std::gamma_distribution<double>{k_recovery_nbar_alpha, 1.0 / k_recovery_nbar_beta}(g);
+  auto normal = std::normal_distribution<double>{0.0, 1.0 / std::sqrt(state.tau)};
+  auto walk = std::vector<double>(k_recovery_knots, 0.0);
+  for (auto k = 1; k != k_recovery_knots; ++k) { walk[k] = walk[k-1] + normal(g); }
+  auto mean = 0.0;
+  for (auto v : walk) { mean += v; }
+  mean /= k_recovery_knots;
+  for (auto k = 0; k != k_recovery_knots; ++k) { state.gamma.push_back(walk[k] - mean - std::log(i_bar)); }
+  auto curve = Skygrid_pop_model{recovery_knots(), state.gamma, c.type};
+  auto tip_times = c.heterochronous ? std::vector<double>{0.0, k_heterochronous_tip_time}
+                                    : std::vector<double>(k_recovery_tips, 0.0);
+  state.tree = kingman_tree_under(curve, tip_times, g);
+  return state;
+}
+
+auto make_recovery_run(ctpl::thread_pool& pool, const Recovery_config& c, const Recovery_state& state,
+                       uint32_t seed) -> std::unique_ptr<delphy::Run> {
+  auto run = std::make_unique<delphy::Run>(pool, std::mt19937{seed}, seed, state.tree, k_recovery_t_step);
+  run->set_pop_model(std::make_shared<Skygrid_pop_model>(recovery_knots(), state.gamma, c.type));
   run->set_topology_moves_enabled(false);
-  run->set_coal_prior_fixed_t_step(t_step);
-  run->set_num_parts(parts);
+  run->set_coal_prior_fixed_t_step(k_recovery_t_step);
+  run->set_num_parts(c.parts);
   run->set_local_moves_per_global_move(60);
   run->set_mu(1e-14);  // the single site carries no mutation, so the likelihood is flat in the times
   run->set_mu_move_enabled(false);
   run->set_alpha_move_enabled(false);
-  run->set_skygrid_tau(tau);
-  auto infer_tau = tau_prior.first > 0.0;
-  run->set_skygrid_tau_move_enabled(infer_tau);
-  if (infer_tau) {
-    run->set_skygrid_tau_prior_alpha(tau_prior.first);
-    run->set_skygrid_tau_prior_beta(tau_prior.second);
+  run->set_skygrid_tau(state.tau);
+  run->set_skygrid_tau_move_enabled(c.free_tau);
+  if (c.free_tau) {
+    run->set_skygrid_tau_prior_alpha(k_tau_alpha);
+    run->set_skygrid_tau_prior_beta(c.kernel_tau_beta);
   }
   run->set_skygrid_low_gamma_barrier_enabled(false);  // the barrier would distort the prior
   run->set_skygrid_inv_nbar_prior_alpha(k_recovery_nbar_alpha);
-  run->set_skygrid_inv_nbar_prior_beta(k_recovery_nbar_beta);
+  run->set_skygrid_inv_nbar_prior_beta(c.kernel_nbar_beta);
   run->set_exact_coalescent_correction(true);
-
-  auto M = k_recovery_knots - 1;
-  auto i_bars = std::vector<double>{};
-  auto log_i_bars = std::vector<double>{};
-  auto deltas = std::vector<std::vector<double>>(M);
-
-  for (auto b = 0; b != global_moves; ++b) {
-    run->do_mcmc_steps(60);
-    if (b < global_moves / 20) { continue; }  // burn-in
-    const auto& pm = static_cast<const Skygrid_pop_model&>(run->pop_model());
-    i_bars.push_back(std::exp(-pm.gamma_bar()));
-    log_i_bars.push_back(-pm.gamma_bar());
-    for (auto k = 1; k <= M; ++k) { deltas[k-1].push_back(pm.gamma(k) - pm.gamma(k-1)); }
-  }
-
-  auto out = Recovery_result{};
-  out.z_i_bar = batch_mean_z(i_bars, k_recovery_nbar_alpha / k_recovery_nbar_beta);
-  out.z_log_i_bar = batch_mean_z(log_i_bars, digamma_of_4() - std::log(k_recovery_nbar_beta));
-  // E[1/tau] is 1/tau when tau is fixed and beta / (alpha - 1) under a Gamma(alpha, rate beta) prior
-  auto expected_delta_sq = infer_tau ? tau_prior.second / (tau_prior.first - 1.0) : 1.0 / tau;
-  for (auto k = 0; k != M; ++k) {
-    out.z_delta.push_back(batch_mean_z(deltas[k], 0.0));
-    auto squares = std::vector<double>{};
-    for (auto d : deltas[k]) { squares.push_back(d * d); }
-    out.z_delta_sq.push_back(batch_mean_z(squares, expected_delta_sq));
-  }
-  out.batch_acceptance = run->exact_coalescent_batches_proposed() > 0
-      ? static_cast<double>(run->exact_coalescent_batches_accepted())
-        / static_cast<double>(run->exact_coalescent_batches_proposed())
-      : 0.0;
-  out.worst_grid_excess = std::abs(run->calc_coal_prior_grid_excess().excess);
-  return out;
+  return run;
 }
 
-auto expect_recovered(const Recovery_result& r, const std::string& label) -> void {
-  std::cerr << absl::StreamFormat(
-      "EXACT RECOVERY %s z(I_bar)=%+.2f z(log I_bar)=%+.2f batch acceptance %.3f grid excess %.3g nats\n",
-      label, r.z_i_bar, r.z_log_i_bar, r.batch_acceptance, r.worst_grid_excess);
-  EXPECT_LT(std::abs(r.z_i_bar), 4.0) << label << " mean of I_bar";
-  EXPECT_LT(std::abs(r.z_log_i_bar), 4.0) << label << " mean of log I_bar";
-  for (auto k = 0; k != std::ssize(r.z_delta); ++k) {
-    std::cerr << absl::StreamFormat(
-        "EXACT RECOVERY %s delta_%d z(mean)=%+.2f z(second moment)=%+.2f\n",
-        label, k + 1, r.z_delta[k], r.z_delta_sq[k]);
-    EXPECT_LT(std::abs(r.z_delta[k]), 4.0) << label << " mean of delta_" << (k + 1);
-    EXPECT_LT(std::abs(r.z_delta_sq[k]), 4.0) << label << " second moment of delta_" << (k + 1);
+struct Recovery_end_state {
+  double tau = 1.0;
+  double i_bar = 0.0;
+  std::vector<double> delta;
+};
+
+struct Recovery_result {
+  std::vector<Recovery_end_state> end_states;
+  double batch_acceptance = 0.0;   // acceptance rate of the exact correction's whole-batch step
+  double worst_grid_excess = 0.0;  // largest |log P_cells - log P_exact| over the end states, in nats
+};
+
+auto run_stationary_replicates(const Recovery_config& c, uint32_t seed_base, int replicates, int moves)
+    -> Recovery_result {
+  auto pool = ctpl::thread_pool{c.parts};
+  auto result = Recovery_result{};
+  auto proposed = int64_t{0};
+  auto accepted = int64_t{0};
+  for (auto r = 0; r != replicates; ++r) {
+    auto seed = seed_base + 7919u * static_cast<uint32_t>(r);
+    auto g = std::mt19937_64{seed};
+    auto run = make_recovery_run(pool, c, draw_stationary_state(c, g), seed);
+    run->do_mcmc_steps(60 * moves);
+    const auto& pm = static_cast<const Skygrid_pop_model&>(run->pop_model());
+    auto end = Recovery_end_state{.tau = run->skygrid_tau(), .i_bar = std::exp(-pm.gamma_bar()), .delta = {}};
+    for (auto k = 1; k != k_recovery_knots; ++k) { end.delta.push_back(pm.gamma(k) - pm.gamma(k-1)); }
+    result.end_states.push_back(std::move(end));
+    proposed += run->exact_coalescent_batches_proposed();
+    accepted += run->exact_coalescent_batches_accepted();
+    result.worst_grid_excess = std::max(result.worst_grid_excess, std::abs(run->calc_coal_prior_grid_excess().excess));
+  }
+  result.batch_acceptance = proposed > 0 ? static_cast<double>(accepted) / static_cast<double>(proposed) : 0.0;
+  return result;
+}
+
+struct Pit_score {
+  std::string name;
+  double z_mean = 0.0;    // mean of u against 1/2
+  double z_spread = 0.0;  // mean of (u - 1/2)^2 against 1/12
+};
+
+auto score_end_states(const Recovery_config& c, const Recovery_result& r) -> std::vector<Pit_score> {
+  auto columns = std::vector<std::pair<std::string, std::vector<double>>>{};
+  auto add = [&](const std::string& name, double u) {
+    auto it = std::ranges::find_if(columns, [&](const auto& col) { return col.first == name; });
+    if (it == columns.end()) { columns.push_back({name, {}}); it = columns.end() - 1; }
+    it->second.push_back(u);
+  };
+  for (const auto& e : r.end_states) {
+    if (c.free_tau) { add("tau", boost::math::gamma_p(k_tau_alpha, k_tau_beta * e.tau)); }
+    add("I_bar", boost::math::gamma_p(k_recovery_nbar_alpha, k_recovery_nbar_beta * e.i_bar));
+    for (auto k = 0; k != std::ssize(e.delta); ++k) {
+      add(absl::StrFormat("delta_%d", k + 1), 0.5 * std::erfc(-e.delta[k] * std::sqrt(e.tau) / std::sqrt(2.0)));
+    }
+  }
+  auto scores = std::vector<Pit_score>{};
+  for (const auto& [name, u] : columns) {
+    auto n = static_cast<double>(std::ssize(u));
+    auto mean = 0.0;
+    auto spread = 0.0;
+    for (auto v : u) { mean += v; spread += (v - 0.5) * (v - 0.5); }
+    mean /= n;
+    spread /= n;
+    scores.push_back({name, (mean - 0.5) / std::sqrt(1.0 / (12.0 * n)),
+                      (spread - 1.0 / 12.0) / std::sqrt(1.0 / (180.0 * n))});
+  }
+  return scores;
+}
+
+auto expect_recovered(const Recovery_config& c, const Recovery_result& r, const std::string& label) -> void {
+  std::cerr << absl::StreamFormat("EXACT RECOVERY %s: %d replicates, batch acceptance %.3f, grid excess up to %.3g nats\n",
+                                  label, std::ssize(r.end_states), r.batch_acceptance, r.worst_grid_excess);
+  for (const auto& s : score_end_states(c, r)) {
+    std::cerr << absl::StreamFormat("EXACT RECOVERY %s %s z(mean)=%+.2f z(spread)=%+.2f\n",
+                                    label, s.name, s.z_mean, s.z_spread);
+    EXPECT_LT(std::abs(s.z_mean), k_recovery_gate) << label << " " << s.name << " location";
+    EXPECT_LT(std::abs(s.z_spread), k_recovery_gate) << label << " " << s.name << " dispersion";
   }
 }
 
@@ -815,8 +921,9 @@ auto expect_recovered(const Recovery_result& r, const std::string& label) -> voi
 // variants recover the prior exactly.
 TEST(Exact_skygrid_mcmc_test, the_marginal_of_the_skygrid_parameters_is_their_prior_on_a_coarse_grid) {
   for (auto type : {Type::k_staircase, Type::k_log_linear}) {
-    auto r = run_exact_prior_recovery(type, 1.0, 5000.0, 20261118u, 20'000, 1, false);
-    expect_recovered(r, absl::StrFormat("coarse %s", type_name(type)));
+    auto c = Recovery_config{.type = type};
+    auto r = run_stationary_replicates(c, 20261118u, k_recovery_replicates, k_recovery_moves);
+    expect_recovered(c, r, absl::StrFormat("coarse %s", type_name(type)));
     // The grid really is coarse: if the cell prior were the target, this is the bias it would carry
     EXPECT_GT(r.worst_grid_excess, 1e-3)
         << type_name(type) << ": the grid was not coarse enough for the comparison to mean anything";
@@ -828,51 +935,25 @@ TEST(Exact_skygrid_mcmc_test, the_marginal_of_the_skygrid_parameters_is_their_pr
 // correction sits on top of.
 TEST(Exact_skygrid_mcmc_test, the_marginal_is_still_the_prior_across_tree_partitions) {
   for (auto parts : {2, 4}) {
-    auto r = run_exact_prior_recovery(Type::k_staircase, 1.0, 5000.0, 20261119u, 20'000, parts, false);
-    expect_recovered(r, absl::StrFormat("parts=%d staircase", parts));
+    auto c = Recovery_config{.type = Type::k_staircase, .parts = parts};
+    auto r = run_stationary_replicates(c, 20261119u, k_recovery_replicates, k_recovery_moves);
+    expect_recovered(c, r, absl::StrFormat("parts=%d staircase", parts));
   }
 }
 
-// The dispersion deficit the campaigns see in the inferred-smoothness arms, and what it is.
-//
-// Campaigns E at 12 and at 100 tips both miss the gate in one inferred-smoothness arm, and both miss
-// on the second moments of the knot differences, which come out too small.  The explanation on offer
-// is the start: Delphy's command line cannot disperse the initial Skygrid curve, so every chain begins
-// at a perfectly flat one, that is at delta_k = 0 exactly, and a flat curve makes the smoothness Gibbs
-// move draw a large precision, which then holds the curve flat.  At the library level a dispersed
-// start costs two lines, so the explanation is testable rather than merely plausible.
-//
-// This test runs the inferred-smoothness arm both ways at the same length and seed and reports both.
-// The flat-start arm is NOT gated: it is the configuration the campaigns found wanting, and asserting
-// that it passes here would be asserting away the campaigns' own result.  The dispersed-start arm is
-// gated, because if the target were wrong a dispersed start would not fix it.
-TEST(Exact_skygrid_mcmc_test, a_dispersed_start_removes_the_dispersion_deficit) {
-  constexpr auto tau_alpha = 3.0;
-  constexpr auto tau_beta = 3.0;   // E[tau] = 1, E[1 / tau] = 3 / 2
-  auto flat = run_exact_prior_recovery(Type::k_log_linear, 1.0, 5000.0, 20261122u, 20'000, 1, false,
-                                       {tau_alpha, tau_beta}, false);
-  auto spread = run_exact_prior_recovery(Type::k_log_linear, 1.0, 5000.0, 20261122u, 20'000, 1, false,
-                                         {tau_alpha, tau_beta}, true);
-
-  auto mean_of = [](const std::vector<double>& v) {
-    auto s = 0.0;
-    for (auto x : v) { s += x; }
-    return s / std::ssize(v);
-  };
-  std::cerr << absl::StreamFormat(
-      "EXACT START EFFECT flat: mean z(second moment) %+.2f, worst %+.2f | dispersed: mean %+.2f, worst %+.2f\n",
-      mean_of(flat.z_delta_sq),
-      *std::ranges::max_element(flat.z_delta_sq, {}, [](double z) { return std::abs(z); }),
-      mean_of(spread.z_delta_sq),
-      *std::ranges::max_element(spread.z_delta_sq, {}, [](double z) { return std::abs(z); }));
-
-  for (auto k = 0; k != std::ssize(spread.z_delta_sq); ++k) {
-    EXPECT_LT(std::abs(spread.z_delta[k]), 4.0) << "dispersed start, mean of delta_" << (k + 1);
-    EXPECT_LT(std::abs(spread.z_delta_sq[k]), 4.0)
-        << "dispersed start, second moment of delta_" << (k + 1);
+// The same statement with the smoothness inferred, tau ~ Gamma(3, rate 3).  This is the arm in which
+// the earlier campaigns and an earlier version of this test reported a deficit in the second moments
+// of the knot differences.  Independent replicates from an exact start showed no deficit: their time
+// averages of delta_k^2 agree with E[1/tau] = 3/2 to within |z| < 2.2 in every arm, and to 0.5% over
+// 64 chains of 200,000 global moves.  What was low was the statistic: a batch-means z of a
+// heavy-tailed, right-skewed time average is biased towards negative values.  See
+// doc/extended/exact_skygrid.md, section 7.
+TEST(Exact_skygrid_mcmc_test, the_marginal_is_the_prior_with_an_inferred_smoothness) {
+  for (auto type : {Type::k_staircase, Type::k_log_linear}) {
+    auto c = Recovery_config{.type = type, .free_tau = true};
+    auto r = run_stationary_replicates(c, 20261122u, k_recovery_replicates, k_recovery_moves);
+    expect_recovered(c, r, absl::StrFormat("inferred tau %s", type_name(type)));
   }
-  EXPECT_LT(std::abs(spread.z_i_bar), 4.0) << "dispersed start, mean of I_bar";
-  EXPECT_LT(std::abs(spread.z_log_i_bar), 4.0) << "dispersed start, mean of log I_bar";
 }
 
 // Heterochronous tips need a different argument, and the difference is worth stating precisely
@@ -900,8 +981,9 @@ TEST(Exact_skygrid_mcmc_test, a_dispersed_start_removes_the_dispersion_deficit) 
 // prior recovery is exact again.
 TEST(Exact_skygrid_mcmc_test, the_marginal_is_the_prior_with_two_heterochronous_tips) {
   for (auto type : {Type::k_staircase, Type::k_log_linear}) {
-    auto r = run_exact_prior_recovery(type, 1.0, 5000.0, 20261120u, 20'000, 1, true);
-    expect_recovered(r, absl::StrFormat("two heterochronous tips %s", type_name(type)));
+    auto c = Recovery_config{.type = type, .heterochronous = true};
+    auto r = run_stationary_replicates(c, 20261120u, k_recovery_replicates, k_recovery_moves);
+    expect_recovered(c, r, absl::StrFormat("two heterochronous tips %s", type_name(type)));
   }
 }
 
@@ -1034,6 +1116,220 @@ TEST(Exact_skygrid_mcmc_test, the_node_time_marginals_match_quadrature_with_seri
             / std::max<int64_t>(1, run->exact_coalescent_batches_proposed()));
     EXPECT_LT(std::abs(z_root), 4.0) << arm.name << " E[t_root]";
     EXPECT_LT(std::abs(z_inner), 4.0) << arm.name << " E[t_inner]";
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Validation driver for the prior-recovery campaigns (not part of the CI suite).
+//
+// Run with --gtest_also_run_disabled_tests --gtest_filter='*DISABLED_prior_recovery_driver*' and
+// the environment variables below.  Each replicate is an independent chain; with
+// DELPHY_VAL_START=stationary its initial state is an exact draw from the joint target (tau, the
+// knot differences, I_bar, and the genealogy given the curve), so the expected time average of
+// every statistic equals its prior expectation at any chain length, burn-in or not.
+//
+//   DELPHY_VAL_OUT        output file (one line per replicate, then the thinned traces)
+//   DELPHY_VAL_TYPE       staircase | log-linear
+//   DELPHY_VAL_TAU        fixed | free  (free: tau ~ Gamma(3, rate 3), so E[delta^2] = 3/2)
+//   DELPHY_VAL_START      flat | test-dispersed | stationary
+//   DELPHY_VAL_REPS       number of replicates
+//   DELPHY_VAL_FIRST      index of the first replicate (replicate r uses seed 1000003 * (r + 1))
+//   DELPHY_VAL_MOVES      global moves per replicate (60 MCMC steps each)
+//   DELPHY_VAL_THIN       thinning of the trace output (0 = no traces)
+namespace {
+
+auto env_or(const char* name, const char* fallback) -> std::string {
+  auto v = std::getenv(name);
+  return v != nullptr ? std::string{v} : std::string{fallback};
+}
+
+// The genealogy of `num_tips` isochronous tips at t = 0 under `pop`, by inverting the cumulative
+// pair hazard exactly with `intensity_integral`.
+auto kingman_tree_under(const Pop_model& pop, int num_tips, std::mt19937_64& g) -> Phylo_tree {
+  auto tree = Phylo_tree{2 * num_tips - 1};
+  tree.ref_sequence = Real_sequence(1, Real_seq_letter::A);
+  auto active = std::vector<Node_index>{};
+  for (auto i = 0; i != num_tips; ++i) {
+    tree.at(i).t = tree.at(i).t_min = tree.at(i).t_max = 0.0;
+    tree.at(i).name = "S" + std::to_string(i);
+    active.push_back(i);
+  }
+  auto t = 0.0;
+  auto next = num_tips;
+  while (std::ssize(active) > 1) {
+    auto k = static_cast<double>(std::ssize(active));
+    auto target = std::exponential_distribution<double>{1.0}(g) / (k * (k - 1) / 2.0);
+    // Find t_new < t with intensity_integral(t_new, t) = target
+    auto width = pop.pop_at_time(t) * target;
+    auto lo = t - width;
+    while (pop.intensity_integral(lo, t) < target) { width *= 2.0; lo = t - width; }
+    auto hi = t;
+    for (auto it = 0; it != 200 && hi - lo > 1e-9 * std::max(1.0, std::abs(lo)); ++it) {
+      auto mid = 0.5 * (lo + hi);
+      if (pop.intensity_integral(mid, t) < target) { hi = mid; } else { lo = mid; }
+    }
+    t = 0.5 * (lo + hi);
+    auto i = g() % active.size(); auto a = active[i]; active[i] = active.back(); active.pop_back();
+    auto j = g() % active.size(); auto b = active[j]; active[j] = active.back(); active.pop_back();
+    auto& node = tree.at(next);
+    node.t = t;
+    node.t_min = -std::numeric_limits<float>::max();
+    node.t_max = +std::numeric_limits<float>::max();
+    node.name = "n" + std::to_string(next);
+    node.children = {a, b};
+    tree.at(a).parent = next;
+    tree.at(b).parent = next;
+    active.push_back(next++);
+  }
+  tree.root = next - 1;
+  tree.at(tree.root).parent = k_no_node;
+  return tree;
+}
+
+}  // namespace
+
+TEST(Exact_skygrid_validation, DISABLED_prior_recovery_driver) {
+  auto out_path = env_or("DELPHY_VAL_OUT", "");
+  ASSERT_FALSE(out_path.empty()) << "DELPHY_VAL_OUT is required";
+  auto type_name_in = env_or("DELPHY_VAL_TYPE", "log-linear");
+  auto type = type_name_in == "staircase" ? Type::k_staircase : Type::k_log_linear;
+  auto free_tau = env_or("DELPHY_VAL_TAU", "free") == "free";
+  auto start = env_or("DELPHY_VAL_START", "stationary");
+  ASSERT_TRUE(start == "flat" || start == "test-dispersed" || start == "stationary") << start;
+  auto reps = std::stoi(env_or("DELPHY_VAL_REPS", "1"));
+  auto first = std::stoi(env_or("DELPHY_VAL_FIRST", "0"));
+  auto moves = std::stoi(env_or("DELPHY_VAL_MOVES", "20000"));
+  auto thin = std::stoi(env_or("DELPHY_VAL_THIN", "10"));
+  constexpr auto tau_alpha = 3.0;
+  constexpr auto tau_beta = 3.0;
+  constexpr auto fixed_tau = 1.0;
+  constexpr auto t_step = 5000.0;
+  const auto M = k_recovery_knots - 1;
+
+  auto out = std::ofstream{out_path};
+  ASSERT_TRUE(out) << out_path;
+  out << "# type=" << type_name_in << " tau=" << (free_tau ? "free" : "fixed") << " start=" << start
+      << " moves=" << moves << " thin=" << thin << "\n";
+
+  auto x = std::vector<double>{};
+  for (auto k = 0; k != k_recovery_knots; ++k) { x.push_back(-2.0e6 + 2.0e6 * k / (k_recovery_knots - 1)); }
+
+  for (auto r = first; r != first + reps; ++r) {
+    auto seed = static_cast<uint32_t>(1000003u * static_cast<uint32_t>(r + 1));
+    auto g = std::mt19937_64{seed};
+
+    auto tau0 = fixed_tau;
+    auto gamma = std::vector<double>(k_recovery_knots, std::log(4.0e5));
+    if (start == "stationary") {
+      if (free_tau) { tau0 = std::gamma_distribution<double>{tau_alpha, 1.0 / tau_beta}(g); }
+      auto i_bar = std::gamma_distribution<double>{k_recovery_nbar_alpha, 1.0 / k_recovery_nbar_beta}(g);
+      auto normal = std::normal_distribution<double>{0.0, 1.0 / std::sqrt(tau0)};
+      auto walk = std::vector<double>(k_recovery_knots, 0.0);
+      for (auto k = 1; k != k_recovery_knots; ++k) { walk[k] = walk[k-1] + normal(g); }
+      auto mean = 0.0;
+      for (auto v : walk) { mean += v; }
+      mean /= k_recovery_knots;
+      for (auto k = 0; k != k_recovery_knots; ++k) { gamma[k] = walk[k] - mean - std::log(i_bar); }
+    } else if (start == "test-dispersed") {
+      // The start of a_dispersed_start_removes_the_dispersion_deficit: a walk drawn with tau = 1,
+      // whatever the tau prior, on the constant-population genealogy below
+      auto s = std::mt19937_64{seed ^ 0x5eedu};
+      auto i_bar = std::gamma_distribution<double>{k_recovery_nbar_alpha, 1.0 / k_recovery_nbar_beta}(s);
+      auto normal = std::normal_distribution<double>{0.0, 1.0};
+      auto walk = std::vector<double>(k_recovery_knots, 0.0);
+      for (auto k = 1; k != k_recovery_knots; ++k) { walk[k] = walk[k-1] + normal(s); }
+      auto mean = 0.0;
+      for (auto v : walk) { mean += v; }
+      mean /= k_recovery_knots;
+      for (auto k = 0; k != k_recovery_knots; ++k) { gamma[k] = walk[k] - mean - std::log(i_bar); }
+    }
+    auto curve = std::make_shared<Skygrid_pop_model>(x, gamma, type);
+    auto tree = start == "stationary" ? kingman_tree_under(*curve, k_recovery_tips, g)
+                                      : make_kingman_tree(k_recovery_tips, g, 4.0e5);
+
+    auto pool = ctpl::thread_pool{1};
+    auto run = std::make_unique<delphy::Run>(pool, std::mt19937{seed}, seed, tree, t_step);
+    run->set_pop_model(curve);
+    run->set_topology_moves_enabled(false);
+    run->set_coal_prior_fixed_t_step(t_step);
+    run->set_num_parts(1);
+    run->set_local_moves_per_global_move(60);
+    run->set_mu(1e-14);
+    run->set_mu_move_enabled(false);
+    run->set_alpha_move_enabled(false);
+    run->set_skygrid_tau(tau0);
+    run->set_skygrid_tau_move_enabled(free_tau);
+    if (free_tau) {
+      run->set_skygrid_tau_prior_alpha(tau_alpha);
+      run->set_skygrid_tau_prior_beta(tau_beta);
+    }
+    run->set_skygrid_low_gamma_barrier_enabled(false);
+    run->set_skygrid_inv_nbar_prior_alpha(k_recovery_nbar_alpha);
+    run->set_skygrid_inv_nbar_prior_beta(k_recovery_nbar_beta);
+    run->set_exact_coalescent_correction(true);
+
+    // Statistics: tau, 1/tau, log I_bar, I_bar, delta_k, delta_k^2
+    auto sums = std::vector<double>(4 + 2 * M, 0.0);
+    auto trace = std::vector<double>{};
+    auto record = [&](bool into_sums, bool into_trace) {
+      const auto& pm = static_cast<const Skygrid_pop_model&>(run->pop_model());
+      auto v = std::vector<double>{run->skygrid_tau(), 1.0 / run->skygrid_tau(), -pm.gamma_bar(),
+                                   std::exp(-pm.gamma_bar())};
+      for (auto k = 1; k <= M; ++k) { v.push_back(pm.gamma(k) - pm.gamma(k-1)); }
+      for (auto k = 1; k <= M; ++k) { v.push_back(std::pow(pm.gamma(k) - pm.gamma(k-1), 2)); }
+      if (into_sums) { for (auto i = 0; i != std::ssize(v); ++i) { sums[i] += v[i]; } }
+      if (into_trace) { trace.insert(trace.end(), v.begin(), v.end()); }
+    };
+    for (auto b = 0; b != moves; ++b) {
+      run->do_mcmc_steps(60);
+      record(true, thin > 0 && b % thin == 0);
+    }
+    out << "REP " << r << " " << seed << " " << run->exact_coalescent_batches_accepted() << " "
+        << run->exact_coalescent_batches_proposed();
+    for (auto v : sums) { out << " " << absl::StrFormat("%.17g", v / moves); }
+    out << "\n";
+    if (thin > 0) {
+      out << "TRACE " << r;
+      for (auto v : trace) { out << " " << absl::StrFormat("%.9g", v); }
+      out << "\n";
+    }
+    out.flush();
+  }
+}
+
+// Validation driver for the replicate design of the recovery tests (not part of the CI suite): it
+// evaluates the statistics of `expect_recovered` for many independent seed bases, to measure their
+// false-alarm rate, and with DELPHY_VAL_KERNEL_TAU_BETA or DELPHY_VAL_KERNEL_NBAR_BETA set, for a
+// chain whose prior differs from the one the end states are scored against, to measure their power.
+//
+//   DELPHY_VAL_OUT, DELPHY_VAL_TYPE, DELPHY_VAL_TAU (fixed | free), DELPHY_VAL_PARTS,
+//   DELPHY_VAL_HETEROCHRONOUS (0 | 1), DELPHY_VAL_FIRST, DELPHY_VAL_REPS (seed bases),
+//   DELPHY_VAL_REPLICATES, DELPHY_VAL_MOVES, DELPHY_VAL_KERNEL_TAU_BETA, DELPHY_VAL_KERNEL_NBAR_BETA
+TEST(Exact_skygrid_validation, DISABLED_recovery_statistic_driver) {
+  auto out_path = env_or("DELPHY_VAL_OUT", "");
+  ASSERT_FALSE(out_path.empty()) << "DELPHY_VAL_OUT is required";
+  auto c = Recovery_config{};
+  c.type = env_or("DELPHY_VAL_TYPE", "staircase") == "staircase" ? Type::k_staircase : Type::k_log_linear;
+  c.free_tau = env_or("DELPHY_VAL_TAU", "fixed") == "free";
+  c.parts = std::stoi(env_or("DELPHY_VAL_PARTS", "1"));
+  c.heterochronous = env_or("DELPHY_VAL_HETEROCHRONOUS", "0") == "1";
+  c.kernel_tau_beta = std::stod(env_or("DELPHY_VAL_KERNEL_TAU_BETA", "3.0"));
+  c.kernel_nbar_beta = std::stod(env_or("DELPHY_VAL_KERNEL_NBAR_BETA", "1.2e6"));
+  auto first = std::stoi(env_or("DELPHY_VAL_FIRST", "0"));
+  auto reps = std::stoi(env_or("DELPHY_VAL_REPS", "1"));
+  auto replicates = std::stoi(env_or("DELPHY_VAL_REPLICATES", std::to_string(k_recovery_replicates).c_str()));
+  auto moves = std::stoi(env_or("DELPHY_VAL_MOVES", std::to_string(k_recovery_moves).c_str()));
+  auto out = std::ofstream{out_path};
+  ASSERT_TRUE(out) << out_path;
+  for (auto b = first; b != first + reps; ++b) {
+    auto seed_base = static_cast<uint32_t>(990001u * static_cast<uint32_t>(b + 1));
+    auto r = run_stationary_replicates(c, seed_base, replicates, moves);
+    out << "BASE " << b << " " << absl::StrFormat("%.4f", r.batch_acceptance);
+    for (const auto& s : score_end_states(c, r)) {
+      out << " " << s.name << " " << absl::StrFormat("%.4f %.4f", s.z_mean, s.z_spread);
+    }
+    out << "\n";
+    out.flush();
   }
 }
 
