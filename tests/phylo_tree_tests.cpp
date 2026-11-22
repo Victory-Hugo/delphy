@@ -792,6 +792,7 @@ TEST(Phylo_tree_test, assert_phylo_tree_matches_tip_descs_checks_every_site_that
   };
   assert_phylo_tree_matches_tip_descs(make_tree(), orig_ref, make_tips(), true);
 
+#if GTEST_HAS_DEATH_TEST  // death tests are unavailable under Emscripten
   {  // a mismatch only at a site where the two references differ
     auto tips = make_tips();
     tips[0].seq_deltas.clear();
@@ -807,6 +808,7 @@ TEST(Phylo_tree_test, assert_phylo_tree_matches_tip_descs_checks_every_site_that
     tree.at(0).mutations = {Mutation{rA, 2, rG, -5.0}};
     EXPECT_DEATH(assert_phylo_tree_matches_tip_descs(tree, orig_ref, make_tips(), true), "site 2");
   }
+#endif
   {  // the same mismatch at a site that is missing in that tip is not a mismatch
     auto tree = make_tree();
     tree.at(0).mutations = {Mutation{rA, 2, rG, -5.0}};
