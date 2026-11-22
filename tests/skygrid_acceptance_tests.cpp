@@ -617,9 +617,13 @@ TEST(Skygrid_move_test, the_hmc_forces_are_the_gradient_of_the_potential_the_mov
 
         EXPECT_GT(run->skygrid_hmc_force_checks(), 0)
             << c.name << " type=" << static_cast<int>(type) << " barrier=" << barrier;
-        EXPECT_LT(run->skygrid_hmc_max_force_discrepancy(), 1e-4)
+        // Relative 1e-4 of the force's scale, unless the central difference itself cannot resolve
+        // that much: where the chain visits very small populations, |U| is large enough for the
+        // round-off floor of the difference to dominate (see skygrid_hmc_max_force_discrepancy_over_resolution).
+        EXPECT_LT(run->skygrid_hmc_max_force_discrepancy_over_resolution(), 1.0)
             << c.name << " type=" << static_cast<int>(type) << " barrier=" << barrier
             << " over " << run->skygrid_hmc_force_checks() << " checks"
+            << "; relative discrepancy=" << run->skygrid_hmc_max_force_discrepancy()
             << "; analytic=" << run->skygrid_hmc_worst_force_analytic()
             << " numeric=" << run->skygrid_hmc_worst_force_numeric()
             << " gamma=" << run->skygrid_hmc_worst_force_gamma()
