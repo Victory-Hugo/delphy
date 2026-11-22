@@ -299,7 +299,8 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS="--coverage"
 
       - name: Build
-        run: cmake --build build/coverage --parallel
+        # An unbounded -j exhausts the runner's memory on the Debug coverage build
+        run: cmake --build build/coverage --parallel 2
 
       - name: Run tests
         run: ./build/coverage/tests/tests
