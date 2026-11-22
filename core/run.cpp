@@ -411,22 +411,24 @@ auto Run::set_calibrations(Calibration_set calibrations) -> void {
 // Gives every calibrated node to the one part that can move it, and sums the contribution of the
 // calibrated nodes that no part can move during a local batch.  See
 // doc/extended/calibration.md, section 6, for why this is exact.
+// Both checks use the configured number of parts, not the number the current stencil happened to cut, so that an
+// unsupported configuration is refused at the first repartition whatever the tree shape and the random stencils.
 auto Run::check_free_topology_calibrations() const -> void {
-  if (topology_moves_enabled_ && exact_coalescent_correction_ && std::ssize(tree_partition_.parts()) != 1
+  if (topology_moves_enabled_ && exact_coalescent_correction_ && num_parts_ != 1
       && not threshold_partitioning_active()) {
     throw std::invalid_argument(absl::StrFormat(
         "The exact coalescent correction with a free topology is only supported with a single tree partition part "
         "(got %d; run with --v0-threads 1).  With several parts the partition stencils depend on the sampled "
         "topology, which the correction does not cover.",
-        std::ssize(tree_partition_.parts())));
+        num_parts_));
   }
   if (not topology_moves_enabled_ || calibrations_.empty()) { return; }
-  if (std::ssize(tree_partition_.parts()) != 1) {
+  if (num_parts_ != 1) {
     throw std::invalid_argument(absl::StrFormat(
         "Age calibrations with a free topology are only supported with a single tree partition part (got %d; "
         "run with --v0-threads 1).  With several parts a topology move inside one part could take a cut-point "
         "subtree into or out of a calibrated clade, which the parts cannot see.",
-        std::ssize(tree_partition_.parts())));
+        num_parts_));
   }
 }
 

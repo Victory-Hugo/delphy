@@ -347,6 +347,34 @@ TEST(Exact_free_topology_test, a_free_topology_is_accepted_with_one_part_only) {
   }
 }
 
+// The refusal follows the configured number of parts.  An 8-tip tree is too small for any stencil to cut it, so every
+// partition has one part; a refusal that looked at the cut partition would never fire here, and on larger trees it
+// would depend on the random stencils, and hence on the standard library's distributions.
+TEST(Exact_free_topology_test, several_configured_parts_are_refused_even_when_the_tree_cannot_be_cut) {
+  auto pool = ctpl::thread_pool{2};
+  auto g = std::mt19937_64{1};
+  auto pop = std::make_shared<Const_pop_model>(k_n0);
+  auto tree = ref_kingman_tree(std::vector<double>(8, 0.0), *pop, g);
+  auto c = Chain_config{.pop = pop, .t_step = k_n0, .correct = false};
+
+  {
+    auto run = make_run(pool, tree, 7, c);
+    run->set_exact_coalescent_correction(true);
+    run->set_num_parts(2);
+    EXPECT_THROW(run->do_mcmc_steps(50), std::invalid_argument);
+  }
+  {
+    auto config = std::string{
+        "version 1\n\ncalibration root\n  taxa all\n  age_units years_bp\n  age_reference_year 2020\n"
+        "  distribution uniform\n  youngest 0.1\n  oldest 100\nend\n"};
+    auto is = std::istringstream{config};
+    auto run = make_run(pool, tree, 7, c);
+    run->set_calibrations(read_calibration_config(is));
+    run->set_num_parts(2);
+    EXPECT_THROW(run->do_mcmc_steps(50), std::invalid_argument);
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // 2. Bookkeeping through topology changes and rolled-back batches
 // ---------------------------------------------------------------------------------------------
