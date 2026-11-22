@@ -670,8 +670,8 @@ auto read_clade_samples_table(std::istream& is) -> Clade_samples_file {
     auto ok = absl::SimpleAtoi(field("chain"), &chain)
         && absl::SimpleAtod(field("age_years"), &age)
         && absl::SimpleAtoi(field("monophyletic"), &mono)
-        && absl::SimpleAtoi(field("tips_below_mrca"), &tips);
-    if (columns.contains("state")) { absl::SimpleAtoi(field("state"), &state); }
+        && absl::SimpleAtoi(field("tips_below_mrca"), &tips)
+        && (not columns.contains("state") || absl::SimpleAtoi(field("state"), &state));
     if (not ok || chain < 0) {
       problems.push_back(absl::StrFormat("line %d: could not parse the numeric fields", line_number));
       continue;

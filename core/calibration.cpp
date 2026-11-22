@@ -653,10 +653,8 @@ auto do_bind(const Calibration_set& set, const Phylo_tree& tree, bool check_time
 
   auto problems = std::vector<std::string>{};
   auto tip_index = absl::flat_hash_map<std::string, Node_index>{};
-  auto num_tips = 0;
   for (const auto& node : index_order_traversal(tree)) {
     if (not tree.at(node).is_tip()) { continue; }
-    ++num_tips;
     auto [it, inserted] = tip_index.emplace(tree.at(node).name, node);
     if (not inserted) {
       problems.push_back(absl::StrFormat(

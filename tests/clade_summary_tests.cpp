@@ -840,6 +840,27 @@ TEST(Clade_summary_test, raw_samples_table_round_trip) {
               testing::Contains(testing::HasSubstr("years_before_1950-01-01")));
 }
 
+TEST(Clade_summary_test, raw_samples_table_state_column) {
+  auto header = std::string{"clade_id\tchain\tstate\tage_years\tmonophyletic\ttips_below_mrca\n"};
+
+  auto good = std::istringstream{header + "AB\t0\t-1\t100.5\t1\t2\n" + "AB\t0\t2000\t101.5\t0\t3\n"};
+  auto back = read_clade_samples_table(good);
+  EXPECT_THAT(back.states, testing::ElementsAre(-1, 2000));
+
+  auto without_state = std::istringstream{
+    "clade_id\tchain\tage_years\tmonophyletic\ttips_below_mrca\nAB\t0\t100.5\t1\t2\n"};
+  EXPECT_THAT(read_clade_samples_table(without_state).states, testing::ElementsAre(-1));
+
+  // A malformed state is an error, not a silent -1
+  auto bad = std::istringstream{header + "AB\t0\tten\t100.5\t1\t2\n"};
+  try {
+    read_clade_samples_table(bad);
+    FAIL() << "a non-numeric state was accepted";
+  } catch (const Clade_spec_error& e) {
+    EXPECT_THAT(e.what(), testing::HasSubstr("line 2: could not parse the numeric fields"));
+  }
+}
+
 TEST(Clade_summary_test, summary_table_names_the_conventions_and_both_quantities) {
   auto specs = parse_specs("clade_id\ttaxa\nAB\tA,B\n");
   auto samples = Clade_samples{};
