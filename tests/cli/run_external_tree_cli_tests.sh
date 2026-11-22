@@ -9,7 +9,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 D="$WORK/data"
 mkdir -p "$WORK"
 [ -f "$D/truth.json" ] || python3 "$HERE/simulate_mtdna_coalescent.py" "$D" --samples 20 --seed 1 --mu-site-year 1.7e-8 \
-    --coal-timescale-years 75000 --dates ancient --mask 303-315,16184-16193 > /dev/null
+    --coal-timescale-years 75000 --dates ancient --mask 303-315,16184-16193 > /dev/null \
+    || { echo "FAIL: could not generate the test data"; exit 1; }
 fail=0
 base=("$DELPHY" --v0-human-mode --v0-in-fasta "$D/samples.fasta" --v0-human-reference-standard rCRS
       --v0-human-reference-fasta "$D/reference.fasta" --v0-human-mask-file "$D/mask.txt"
@@ -19,12 +20,12 @@ base=("$DELPHY" --v0-human-mode --v0-in-fasta "$D/samples.fasta" --v0-human-refe
 expect_error() {  # expect_error NAME PATTERN args...
   local name=$1 pat=$2; shift 2
   "${base[@]}" "$@" > /dev/null 2> "$WORK/err.txt"; local rc=$?
-  if [ $rc -ne 0 ] && grep -q -- "$pat" "$WORK/err.txt"; then echo "PASS: $name"; else echo "FAIL: $name (rc=$rc)"; fail=$((fail+1)); fi
+  if [ $rc -ne 0 ] && grep -q -- "$pat" "$WORK/err.txt"; then echo "PASS: $name"; else echo "FAIL: $name (rc=$rc)"; sed -n 1,3p "$WORK/err.txt"; fail=$((fail+1)); fi
 }
 expect_ok() {
   local name=$1; shift
   "${base[@]}" "$@" > /dev/null 2> "$WORK/err.txt"; local rc=$?
-  if [ $rc -eq 0 ]; then echo "PASS: $name"; else echo "FAIL: $name (rc=$rc)"; fail=$((fail+1)); fi
+  if [ $rc -eq 0 ]; then echo "PASS: $name"; else echo "FAIL: $name (rc=$rc)"; sed -n 1,3p "$WORK/err.txt"; fail=$((fail+1)); fi
 }
 
 T="$D/true_tree.nwk"

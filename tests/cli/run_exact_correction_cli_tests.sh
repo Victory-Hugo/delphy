@@ -9,7 +9,8 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 D="$WORK/data"
 mkdir -p "$WORK"
 [ -f "$D/truth.json" ] || python3 "$HERE/simulate_mtdna_coalescent.py" "$D" --samples 20 --seed 1 --mu-site-year 1.7e-8 \
-    --coal-timescale-years 75000 --dates same --mask 303-315,16184-16193 > /dev/null
+    --coal-timescale-years 75000 --dates same --mask 303-315,16184-16193 > /dev/null \
+    || { echo "FAIL: could not generate the test data"; exit 1; }
 fail=0
 T="$D/true_tree.nwk"
 base=("$DELPHY" --v0-human-mode --v0-in-fasta "$D/samples.fasta" --v0-human-reference-standard rCRS

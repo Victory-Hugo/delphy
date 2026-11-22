@@ -11,9 +11,11 @@ E="$ROOT/doc/extended/examples/calibration"
 D="$WORK/data"
 mkdir -p "$WORK"
 [ -f "$D/truth.json" ] || python3 "$HERE/simulate_mtdna_coalescent.py" "$D" --samples 20 --seed 1 \
-    --mu-site-year 1.7e-8 --coal-timescale-years 75000 --dates same --mask 303-315,16184-16193 > /dev/null
+    --mu-site-year 1.7e-8 --coal-timescale-years 75000 --dates same --mask 303-315,16184-16193 > /dev/null \
+    || { echo "FAIL: could not generate the test data"; exit 1; }
 [ -f "$WORK/sim.cal" ] || python3 "$HERE/make_calibration_config.py" "$D" "$WORK/sim.cal" \
-    --distribution normal --width-frac 0.1 --truth-out "$WORK/sim_clades.json" > /dev/null
+    --distribution normal --width-frac 0.1 --truth-out "$WORK/sim_clades.json" > /dev/null \
+    || { echo "FAIL: could not generate the test data"; exit 1; }
 
 fail=0
 # Base command: the example data set, same-date samples, external rooted topology, NO rate information

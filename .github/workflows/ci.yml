@@ -134,6 +134,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           set -e
+          # The data generators under tests/cli need numpy
+          python3 -m pip install numpy
           work=$(mktemp -d)
           for s in run_external_tree_cli_tests run_calibration_cli_tests run_coalescent_cli_tests \
                    run_exact_correction_cli_tests run_observation_cli_tests \
@@ -144,7 +146,7 @@ jobs:
             pass=$(grep -c '^PASS' "$work/$s.out" || true)
             fail=$(grep -c '^FAIL' "$work/$s.out" || true)
             echo "$s: $pass passed, $fail failed"
-            if [ "$fail" != 0 ]; then sed -n '/^FAIL/p' "$work/$s.out"; exit 1; fi
+            if [ "$fail" != 0 ]; then cat "$work/$s.out"; exit 1; fi
           done
           bash tests/cli/run_clade_summary_cli_tests.sh build/release/delphy \
               build/release/delphy_clades build/release/delphy_mcc "$work/clades" \
@@ -152,7 +154,7 @@ jobs:
           pass=$(grep -c '^PASS' "$work/clades.out" || true)
           fail=$(grep -c '^FAIL' "$work/clades.out" || true)
           echo "run_clade_summary_cli_tests: $pass passed, $fail failed"
-          if [ "$fail" != 0 ]; then sed -n '/^FAIL/p' "$work/clades.out"; exit 1; fi
+          if [ "$fail" != 0 ]; then cat "$work/clades.out"; exit 1; fi
 
       - name: Upload test results
         uses: actions/upload-artifact@v7
