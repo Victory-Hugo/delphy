@@ -6,6 +6,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #include "ctpl_stl.h"
@@ -25,6 +26,15 @@ namespace {
 
 constexpr auto k_mu = 2e-4;    // per site per day
 constexpr auto k_n0 = 1000.0;  // days
+
+// Poisson draw that allows a zero mean, which std::poisson_distribution does not
+auto draw_poisson(double mean, std::mt19937_64& g) -> int {
+  if (not std::isfinite(mean) or mean < 0.0) {
+    throw std::invalid_argument{"draw_poisson: mean must be finite and non-negative"};
+  }
+  if (mean == 0.0) { return 0; }
+  return std::poisson_distribution<int>{mean}(g);
+}
 
 // A Kingman tree over `num_tips` tips at one date whose site rates differ: site l gets `rate(l)`
 // times the clock rate, so the mutation counts per site are genuinely heterogeneous.
@@ -81,7 +91,7 @@ auto make_tree(int num_tips, Site_index num_sites, uint64_t seed,
       auto branch = tree.at(c).t - tree.at(p).t;
       auto times = std::vector<std::pair<double, Site_index>>{};
       for (auto site = Site_index{0}; site != num_sites; ++site) {
-        auto events = std::poisson_distribution<int>{k_mu * rate(site) * branch}(g);
+        auto events = draw_poisson(k_mu * rate(site) * branch, g);
         for (auto e = 0; e != events; ++e) {
           times.push_back({tree.at(p).t + uniform(g) * branch, site});
         }

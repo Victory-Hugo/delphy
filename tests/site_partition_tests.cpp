@@ -5,6 +5,7 @@
 #include <memory>
 #include <random>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,15 @@ auto expect_error(F&& f, const std::string& fragment) -> void {
   } catch (const Site_partition_error& e) {
     EXPECT_THAT(std::string{e.what()}, testing::HasSubstr(fragment));
   }
+}
+
+// Poisson draw that allows a zero mean, which std::poisson_distribution does not
+auto draw_poisson(double mean, std::mt19937_64& g) -> int {
+  if (not std::isfinite(mean) or mean < 0.0) {
+    throw std::invalid_argument{"draw_poisson: mean must be finite and non-negative"};
+  }
+  if (mean == 0.0) { return 0; }
+  return std::poisson_distribution<int>{mean}(g);
 }
 
 // A Kingman tree over `num_tips` tips at one date, with Jukes-Cantor mutations whose rate is `rate(site)`
@@ -89,7 +99,7 @@ auto make_tree(int num_tips, Site_index num_sites, uint64_t seed,
       auto st = state;
       auto times = std::vector<std::pair<double, Site_index>>{};
       for (auto l = Site_index{0}; l != num_sites; ++l) {
-        auto m = std::poisson_distribution<int>{rate(l) * k_mu * (t1 - t0)}(g);
+        auto m = draw_poisson(rate(l) * k_mu * (t1 - t0), g);
         for (auto i = 0; i != m; ++i) {
           times.push_back({t0 + (t1 - t0) * std::uniform_real_distribution<double>{0.0, 1.0}(g), l});
         }
