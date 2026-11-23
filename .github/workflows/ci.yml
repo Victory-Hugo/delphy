@@ -277,7 +277,19 @@ jobs:
           lcov --remove coverage.info '/usr/*' '*/third-party/*' '*/tests/*' '*/_deps/*' --output-file coverage.info --ignore-errors unused,inconsistent
           lcov --list coverage.info
 
+      - name: Check for a Codecov token
+        id: codecov
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          if [ -n "$CODECOV_TOKEN" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::CODECOV_TOKEN is not set; skipping the Codecov upload"
+          fi
+
       - name: Upload to Codecov
+        if: steps.codecov.outputs.available == 'true'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
